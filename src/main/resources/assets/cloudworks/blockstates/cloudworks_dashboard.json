@@ -1,0 +1,20 @@
+{
+  "forge_marker": 1,
+  "variants": {
+    "active=false,facing=up": { "model": "cloudworks:cloudworks_dashboard_offline" },
+    "active=false,facing=down": { "model": "cloudworks:cloudworks_dashboard_offline", "x": 180 },
+    "active=false,facing=north": { "model": "cloudworks:cloudworks_dashboard_offline", "x": 90 },
+    "active=false,facing=south": { "model": "cloudworks:cloudworks_dashboard_offline", "x": 90, "y": 180 },
+    "active=false,facing=east": { "model": "cloudworks:cloudworks_dashboard_offline", "x": 90, "y": 90 },
+    "active=false,facing=west": { "model": "cloudworks:cloudworks_dashboard_offline", "x": 90, "y": -90 },
+    "active=true,facing=up": { "model": "cloudworks:cloudworks_dashboard" },
+    "active=true,facing=down": { "model": "cloudworks:cloudworks_dashboard", "x": 180 },
+    "active=true,facing=north": { "model": "cloudworks:cloudworks_dashboard", "x": 90 },
+    "active=true,facing=south": { "model": "cloudworks:cloudworks_dashboard", "x": 90, "y": 180 },
+    "active=true,facing=east": { "model": "cloudworks:cloudworks_dashboard", "x": 90, "y": 90 },
+    "active=true,facing=west": { "model": "cloudworks:cloudworks_dashboard", "x": 90, "y": -90 },
+    "inventory": [{
+      "model": "cloudworks:cloudworks_dashboard"
+    }]
+  }
+}

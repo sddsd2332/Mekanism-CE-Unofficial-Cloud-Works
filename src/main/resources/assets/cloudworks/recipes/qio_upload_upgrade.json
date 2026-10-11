@@ -1,0 +1,15 @@
+{
+  "type": "forge:ore_shaped",
+  "pattern": [
+    " A ",
+    "ECE",
+    " Q "
+  ],
+  "key": {
+    "A": { "item": "mekanism:enrichedalloy" },
+    "E": { "item": "minecraft:ender_pearl" },
+    "C": { "item": "mekanism:controlcircuit", "data": 3 },
+    "Q": { "item": "mekanism:qio_importer" }
+  },
+  "result": { "item": "cloudworks:qio_upload_upgrade" }
+}

@@ -1,0 +1,17 @@
+{
+  "type": "forge:ore_shaped",
+  "pattern": [
+    " D ",
+    "QCT",
+    "APA"
+  ],
+  "key": {
+    "D": { "item": "mekanism:qio_drive_base_item" },
+    "Q": { "item": "mekanism:qio_exporter" },
+    "C": { "item": "mekanism:controlcircuit", "data": 3 },
+    "T": { "item": "mekanism:teleportationcore" },
+    "A": { "item": "mekanism:enrichedalloy" },
+    "P": { "item": "minecraft:piston" }
+  },
+  "result": { "item": "cloudworks:cloud_output" }
+}

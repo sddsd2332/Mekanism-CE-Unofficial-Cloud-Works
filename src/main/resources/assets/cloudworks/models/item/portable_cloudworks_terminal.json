@@ -1,0 +1,7 @@
+{
+  "parent": "cloudworks:item/standard_item",
+  "textures": {
+    "layer0": "cloudworks:items/cloudworks_terminal",
+    "layer1": "cloudworks:items/cloudworks_terminal_led"
+  }
+}

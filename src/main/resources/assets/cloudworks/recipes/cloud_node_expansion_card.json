@@ -1,0 +1,16 @@
+{
+  "type": "forge:ore_shaped",
+  "pattern": [
+    "IGI",
+    "ACA",
+    "IPI"
+  ],
+  "key": {
+    "I": { "ore": "ingotIron", "type": "forge:ore_dict" },
+    "G": { "ore": "ingotGold", "type": "forge:ore_dict" },
+    "A": { "item": "mekanism:enrichedalloy" },
+    "C": { "item": "mekanism:controlcircuit", "data": 1 },
+    "P": { "item": "minecraft:paper" }
+  },
+  "result": { "item": "cloudworks:cloud_node_expansion_card" }
+}

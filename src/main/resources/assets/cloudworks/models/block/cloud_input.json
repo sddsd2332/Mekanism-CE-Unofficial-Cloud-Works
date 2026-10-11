@@ -1,0 +1,8 @@
+{
+  "parent": "block/cube_bottom_top",
+  "textures": {
+    "top": "cloudworks:blocks/hybrid_storage/top",
+    "bottom": "cloudworks:blocks/hybrid_storage/bottom",
+    "side": "cloudworks:blocks/hybrid_storage/side"
+  }
+}

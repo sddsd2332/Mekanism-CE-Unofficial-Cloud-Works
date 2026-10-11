@@ -1,0 +1,102 @@
+apply from: 'gradle/scripts/helpers.gradle'
+
+repositories {
+    flatDir {
+        dirs("libs")
+    }
+    // Other repositories described by default:
+    // CleanroomMC: https://maven.cleanroommc.com
+    exclusiveContent {
+        forRepository {
+            maven {
+                name 'CleanroomMC CurseMaven'
+                url 'https://curse.cleanroommc.com'
+            }
+        }
+        filter {
+            includeGroup 'curse.maven'
+        }
+    }
+    exclusiveContent {
+        forRepository {
+            maven {
+                name 'Modrinth'
+                url 'https://api.modrinth.com/maven'
+            }
+        }
+        filter {
+            includeGroup 'maven.modrinth'
+        }
+    }
+    mavenLocal() // Must be last for caching to work
+}
+
+dependencies {
+    // Include StripLatestForgeRequirements by default for the dev env, saves everyone a hassle
+    runtimeOnly 'com.cleanroommc:strip-latest-forge-requirements:1.0'
+    // Include OSXNarratorBlocker by default for the dev env, for M1+ Macs
+    // runtimeOnly 'com.cleanroommc:osxnarratorblocker:1.0'
+
+    // Example - Dependency descriptor:
+    // 'com.google.code.gson:gson:2.8.6' << group: com.google.code.gson, name:gson, version:2.8.6
+    // 'group:name:version:classifier' where classifier is optional
+
+    // Example - Deobfuscating dependencies:
+    // rfg.deobf('curse.maven:had-enough-items-557549:4543375')
+    // By wrapping a dependency descriptor in rfg.deobf() method call, the dependency is queued for deobfuscation
+    // When deobfuscating, RFG respects the mapping_channel + mapping_version stated in gradle.properties
+
+    // Example - CurseMaven dependencies:
+    // 'curse.maven:had-enough-items-557549:4543375' << had-enough-items = project slug, 557549 = project id, 4543375 = file id
+    // Full documentation: https://cursemaven.com/
+
+    // Example - Modrinth dependencies:
+    // 'maven.modrinth:jei:4.16.1.1000' << jei = project name, 4.16.1.1000 = file version
+    // Full documentation: https://docs.modrinth.com/docs/tutorials/maven/
+
+    // Common dependency types (configuration):
+    // implementation = dependency available at both compile time and runtime
+    // runtimeOnly = runtime dependency
+    // compileOnly = compile time dependency
+    // annotationProcessor = annotation processing dependencies
+
+    // Transitive dependencies:
+    // (Dependencies that your dependency depends on)
+    // If you wish to exclude transitive dependencies in the described dependencies
+    // Use a closure as such:
+    // implementation ('com.google.code.gson:gson:2.8.6') {
+    //     transitive = false
+    // }
+
+    implementation rfg.deobf('curse.maven:had-enough-items-557549:8081514')
+    implementation 'curse.maven:tesla-244651:2487959'
+    implementation 'curse.maven:inventory-tweaks-API-223094:2923461'
+    implementation 'curse.maven:hwyla-253449:2568751'
+    implementation 'curse.maven:redstone-flux-270789:2920436'
+    implementation rfg.deobf('curse.maven:industrial-craft-242638:3838713')
+    implementation 'curse.maven:the-one-probe-245211:2667280'
+    implementation 'curse.maven:flux-networks-248020:3178199'
+    runtimeOnly 'curse.maven:ftb-library-237167:2985811'
+    runtimeOnly 'curse.maven:ftb-utilities-237102:3157548'
+    runtimeOnly 'curse.maven:had-enough-characters-640802:4035773'
+    runtimeOnly 'curse.maven:better-advancements-272515:2685984'
+    implementation 'curse.maven:crafttweaker-239197:8051578'
+    implementation 'curse.maven:buildcraft-61811:3204475'
+   
+    implementation rfg.deobf(files('libs/Mekanism-CE-Unofficial-All-10.0.5.023-dev.jar'))
+    implementation rfg.deobf(files('libs/MekanismMixinHelp-1.3.1-dev.jar'))
+    implementation rfg.deobf(files('libs/MekanismMoreMekaSuitModules-1.3.0-dev.jar'))
+    implementation rfg.deobf(files('libs/MekanismCeU-MoreMachine-1.5.0-dev.jar'))
+
+    // Plain JVM registration fixtures do not run Forge's optional-interface transformer.
+    testRuntimeOnly 'curse.maven:computercraft-67504:2478952'
+    testRuntimeOnly 'curse.maven:opencomputers-223008:4526246'
+    testRuntimeOnly rfg.deobf('curse.maven:farmers-delight-legacy-1517486:8126474')
+
+    // Development runtime: build the sibling addon first; it is not bundled in this addon.
+
+    implementation rfg.deobf("curse.maven:catalogue-vintage-1465746:7652301")
+    implementation rfg.deobf(files("libs/ae2-uel-v0.56.8-novaeng_ver.jar"))
+
+}
+

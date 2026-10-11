@@ -1,0 +1,7 @@
+{
+  "parent": "cloudworks:item/standard_item",
+  "textures": {
+    "layer0": "cloudworks:items/qio/qio_auto_output_upgrade",
+    "layer1": "cloudworks:items/qio/wifi"
+  }
+}

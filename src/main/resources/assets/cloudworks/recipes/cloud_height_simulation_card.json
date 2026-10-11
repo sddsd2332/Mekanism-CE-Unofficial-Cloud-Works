@@ -1,0 +1,14 @@
+{
+  "type": "forge:ore_shaped",
+  "pattern": [
+    " A ",
+    "ICI",
+    " A "
+  ],
+  "key": {
+    "A": { "item": "mekanism:enrichedalloy" },
+    "I": { "ore": "ingotIron", "type": "forge:ore_dict" },
+    "C": { "item": "minecraft:compass" }
+  },
+  "result": { "item": "cloudworks:cloud_height_simulation_card" }
+}

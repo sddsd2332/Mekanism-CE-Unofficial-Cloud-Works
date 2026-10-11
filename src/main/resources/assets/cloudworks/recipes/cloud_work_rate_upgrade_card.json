@@ -1,0 +1,14 @@
+{
+  "type": "forge:ore_shaped",
+  "pattern": [
+    "ASA",
+    "ACA",
+    "ASA"
+  ],
+  "key": {
+    "A": { "item": "mekanism:enrichedalloy" },
+    "S": { "item": "mekanism:speedupgrade" },
+    "C": { "item": "mekanism:controlcircuit", "data": 2 }
+  },
+  "result": { "item": "cloudworks:cloud_work_rate_upgrade_card" }
+}

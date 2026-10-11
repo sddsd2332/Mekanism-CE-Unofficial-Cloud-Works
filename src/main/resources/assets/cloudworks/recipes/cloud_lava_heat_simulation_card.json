@@ -1,0 +1,14 @@
+{
+  "type": "forge:ore_shaped",
+  "pattern": [
+    " M ",
+    "ACA",
+    " M "
+  ],
+  "key": {
+    "M": { "item": "minecraft:magma_block" },
+    "A": { "item": "mekanism:enrichedalloy" },
+    "C": { "item": "mekanism:controlcircuit", "data": 1 }
+  },
+  "result": { "item": "cloudworks:cloud_lava_heat_simulation_card" }
+}

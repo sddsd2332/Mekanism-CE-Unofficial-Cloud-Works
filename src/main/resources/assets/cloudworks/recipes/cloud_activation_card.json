@@ -1,0 +1,14 @@
+{
+  "type": "forge:ore_shaped",
+  "pattern": [
+    " A ",
+    "ECE",
+    " A "
+  ],
+  "key": {
+    "A": { "item": "mekanism:enrichedalloy" },
+    "E": { "item": "minecraft:ender_pearl" },
+    "C": { "item": "mekanism:controlcircuit", "data": 1 }
+  },
+  "result": { "item": "cloudworks:cloud_activation_card" }
+}

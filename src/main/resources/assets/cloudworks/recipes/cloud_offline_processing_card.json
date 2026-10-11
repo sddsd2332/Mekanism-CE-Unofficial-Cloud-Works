@@ -1,0 +1,15 @@
+{
+  "type": "forge:ore_shaped",
+  "pattern": [
+    "AGA",
+    "GNC",
+    "AGA"
+  ],
+  "key": {
+    "A": { "item": "mekanism:enrichedalloy" },
+    "G": { "ore": "ingotGold", "type": "forge:ore_dict" },
+    "N": { "item": "minecraft:nether_star" },
+    "C": { "item": "mekanism:controlcircuit", "data": 3 }
+  },
+  "result": { "item": "cloudworks:cloud_offline_processing_card" }
+}

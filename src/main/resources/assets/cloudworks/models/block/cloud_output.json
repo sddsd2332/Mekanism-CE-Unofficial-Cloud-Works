@@ -1,0 +1,8 @@
+{
+  "parent": "block/cube_bottom_top",
+  "textures": {
+    "top": "cloudworks:blocks/dimensional_stabilizer/top",
+    "bottom": "cloudworks:blocks/dimensional_stabilizer/bottom",
+    "side": "cloudworks:blocks/dimensional_stabilizer/side"
+  }
+}
