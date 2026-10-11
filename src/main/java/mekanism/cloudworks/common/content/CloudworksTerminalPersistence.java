@@ -25,6 +25,9 @@ import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.nbt.CompressedStreamTools;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.nbt.NBTTagList;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.World;
+import net.minecraft.world.storage.ISaveHandler;
 import net.minecraft.world.chunk.storage.RegionFileCache;
 import net.minecraft.world.storage.ThreadedFileIOBase;
 
@@ -112,17 +115,44 @@ public final class CloudworksTerminalPersistence {
 
     /** Captures player NBT on the server thread and writes it on the durability worker. */
     static java.util.concurrent.CompletableFuture<Void> savePlayer(EntityPlayerMP player) {
+        if (player == null) return failedPlayerSave("Missing player", null);
         if (loggedOutPlayers.contains(player.getUniqueID())) return revokedSave();
-        if (player.getServer().getPlayerList().getPlayerByUUID(player.getUniqueID()) != player) return revokedSave();
-        File directory = new File(player.getServer().getWorld(0).getSaveHandler().getWorldDirectory(), "playerdata");
+        MinecraftServer server = player.getServer();
+        if (server == null || server.getPlayerList() == null)
+            return failedPlayerSave("Missing Minecraft server or player list", player.getUniqueID());
+        if (server.getPlayerList().getPlayerByUUID(player.getUniqueID()) != player) return revokedSave();
+        World overworld = server.getWorld(0);
+        if (overworld == null) return failedPlayerSave("Overworld is unavailable", player.getUniqueID());
+        ISaveHandler saveHandler = overworld.getSaveHandler();
+        if (saveHandler == null) return failedPlayerSave("World save handler is unavailable", player.getUniqueID());
+        File directory;
+        try {
+            directory = playerDataDirectory(saveHandler.getWorldDirectory());
+        } catch (IllegalArgumentException invalidDirectory) {
+            return failedPlayerSave(invalidDirectory.getMessage(), player.getUniqueID());
+        }
         NBTTagCompound snapshot = player.writeToNBT(new NBTTagCompound());
         String playerId = player.getCachedUniqueIdString();
         return savePlayerSnapshot(player.getUniqueID(), directory, playerId, snapshot);
     }
 
+    static File playerDataDirectory(File worldDirectory) {
+        if (worldDirectory == null)
+            throw new IllegalArgumentException("World save directory is unavailable");
+        File absoluteWorldDirectory = worldDirectory.getAbsoluteFile();
+        File directory = new File(absoluteWorldDirectory, "playerdata");
+        if (!directory.isAbsolute())
+            throw new IllegalArgumentException("Player data directory must be absolute");
+        return directory;
+    }
+
     static CompletableFuture<Void> savePlayerSnapshot(java.util.UUID owner, File directory,
             String playerId, NBTTagCompound snapshot) {
         if (loggedOutPlayers.contains(owner)) return revokedSave();
+        if (directory == null || !directory.isAbsolute())
+            return failedPlayerSave("Player data directory must be absolute", owner);
+        if (owner == null || playerId == null || playerId.isEmpty() || snapshot == null)
+            return failedPlayerSave("Invalid player snapshot", owner);
         ExecutorService worker = playerExecutor();
         NBTTagCompound detached = snapshot.copy();
         PlayerWrite write = new PlayerWrite(directory.toPath().resolve(playerId + ".dat"), worker);
@@ -191,6 +221,15 @@ public final class CloudworksTerminalPersistence {
     private static CompletableFuture<Void> revokedSave() {
         CompletableFuture<Void> refused = new CompletableFuture<>();
         refused.completeExceptionally(new CancellationException("Player save requested after logout"));
+        return refused;
+    }
+
+    private static CompletableFuture<Void> failedPlayerSave(String reason, UUID player) {
+        IllegalStateException failure = new IllegalStateException(
+                "Refusing Cloudworks player save for " + player + ": " + reason);
+        LOGGER.error(failure.getMessage(), failure);
+        CompletableFuture<Void> refused = new CompletableFuture<>();
+        refused.completeExceptionally(failure);
         return refused;
     }
 

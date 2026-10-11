@@ -21,6 +21,7 @@ import mekanism.common.config.MekanismConfig;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.world.World;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.util.EnumFacing;
 import net.minecraftforge.common.MinecraftForge;
@@ -183,8 +184,15 @@ public final class Cloudworks implements IModule {
 
     @Mod.EventHandler
     public void serverStarting(FMLServerStartingEvent event) {
+        net.minecraft.server.MinecraftServer server = event.getServer();
+        World world = server == null ? null : server.getEntityWorld();
+        net.minecraft.world.storage.ISaveHandler saveHandler = world == null ? null : world.getSaveHandler();
+        java.io.File worldDirectory = saveHandler == null ? null : saveHandler.getWorldDirectory();
+        if (worldDirectory == null) {
+            throw new IllegalStateException("Cloudworks cannot start without a valid world save directory");
+        }
         CloudworksConfig.serverStarting();
-        CloudworksPlayerDataManager.INSTANCE.load(event.getServer().getEntityWorld().getSaveHandler().getWorldDirectory());
+        CloudworksPlayerDataManager.INSTANCE.load(worldDirectory);
         CloudworksServerTickService.INSTANCE.onServerStarting();
         CommandCloudworks.register(event);
     }

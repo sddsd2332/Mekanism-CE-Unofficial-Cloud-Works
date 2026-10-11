@@ -609,6 +609,8 @@ public final class CloudworksPlayerDataManager {
 
     public synchronized void load(File worldDirectory) {
         if (parent != null) throw new IllegalStateException("Only the world manager may load a save");
+        if (worldDirectory == null)
+            throw new IllegalArgumentException("Cloudworks world directory cannot be null");
         Path next = worldDirectory.toPath().toAbsolutePath().normalize().resolve("cloudworks");
         if (next.equals(root)) return;
         if (root != null) throw new IllegalStateException("Cloudworks world must be closed before switching saves");
