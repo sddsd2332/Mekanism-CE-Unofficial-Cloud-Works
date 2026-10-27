@@ -5,13 +5,15 @@ import java.util.List;
 import mekanism.client.gui.IGuiWrapper;
 import mekanism.client.gui.element.GuiInnerScreen;
 import mekanism.client.gui.element.window.GuiWindow;
-import mekanism.cloudworks.api.CloudworksGenerationContext;
+import mekanism.cloudworks.api.environment.CloudworksGenerationContext;
 import mekanism.cloudworks.common.content.CloudworksWindowTypes;
 import mekanism.cloudworks.common.inventory.ContainerCloudworks;
+import mekanism.cloudworks.common.network.data.CloudworksGuiData;
 import mekanism.cloudworks.common.network.data.CloudworksGuiData.Overview;
 import mekanism.common.util.LangUtils;
 import net.minecraft.util.text.ITextComponent;
 import net.minecraft.util.text.TextComponentString;
+import mekanism.cloudworks.common.service.CloudworksOutputMultiplier;
 
 public final class GuiCloudStatusWindow extends GuiWindow {
     private final ContainerCloudworks container;
@@ -27,17 +29,23 @@ public final class GuiCloudStatusWindow extends GuiWindow {
     private List<ITextComponent> status() {
         Overview data = container.guiData().overview;
         List<ITextComponent> lines = new ArrayList<>();
-        add(lines, "height", data.simulatedHeight);
         add(lines, "time", LangUtils.localize("cloudworks.editor.time_" + CloudworksGenerationContext.timeOfDay(data.clockTick))
                 + " " + CloudworksGenerationContext.clockTime(data.clockTick));
         add(lines, "offline", yesNo(data.offlineUnlocked));
         add(lines, "offline_allowed", yesNo(data.offlineProcessingEnabled));
-        add(lines, "lava", data.lavaHeatCards);
-        add(lines, "nether", yesNo(data.netherEnvironment));
         add(lines, "work_rate", data.workRate);
+        add(lines, "output_multiplier",
+                CloudworksOutputMultiplier.format(data.outputMultiplierUnits) + "x");
         add(lines, "lines", data.total + " / " + data.unlocked + " / " + data.maximum);
         add(lines, "nodes", data.maxMachineNodes + " / " + data.machineNodeLimit);
         add(lines, "machines_per_node", data.maxMachinesPerNode);
+        // Generic cloud-effect levels (8.6): addon ids are displayed verbatim; built-in
+        // effects keep their dedicated status rows above (no double truth).
+        for (CloudworksGuiData.EffectLevel effect : data.effectLevels) {
+            String key = "cloudworks.cloud.status_effect_" + effect.id;
+            String label = LangUtils.canLocalize(key) ? LangUtils.localize(key) : effect.id;
+            lines.add(new TextComponentString(label + ": " + effect.level));
+        }
         return lines;
     }
 

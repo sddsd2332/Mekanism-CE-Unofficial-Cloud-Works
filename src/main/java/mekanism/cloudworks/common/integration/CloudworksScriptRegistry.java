@@ -2,7 +2,9 @@ package mekanism.cloudworks.common.integration;
 
 import java.util.ArrayList;
 import java.util.List;
-import mekanism.cloudworks.common.registry.CloudworksRegistries;
+import mekanism.cloudworks.api.CloudworksAPI;
+import java.util.Objects;
+import mekanism.common.Mekanism;
 
 /** CT-independent startup queue; declarations are resolved after optional machine registrations. */
 public final class CloudworksScriptRegistry {
@@ -13,15 +15,15 @@ public final class CloudworksScriptRegistry {
     private CloudworksScriptRegistry() {}
 
     public static synchronized void enqueue(Runnable declaration) {
-        if (applied || CloudworksRegistries.isFrozen())
+        if (applied || !CloudworksAPI.registrationOpen())
             throw new IllegalStateException("Cloudworks scripts require a restart");
-        DECLARATIONS.add(java.util.Objects.requireNonNull(declaration));
+        DECLARATIONS.add(Objects.requireNonNull(declaration));
     }
 
     public static synchronized void enqueueFinal(Runnable declaration) {
-        if (applied || CloudworksRegistries.isFrozen())
+        if (applied || !CloudworksAPI.registrationOpen())
             throw new IllegalStateException("Cloudworks scripts require a restart");
-        FINAL_DECLARATIONS.add(java.util.Objects.requireNonNull(declaration));
+        FINAL_DECLARATIONS.add(Objects.requireNonNull(declaration));
     }
 
     public static synchronized void apply() {
@@ -31,7 +33,7 @@ public final class CloudworksScriptRegistry {
             try {
                 CloudworksScriptMachines.finish();
             } catch (RuntimeException failure) {
-                mekanism.common.Mekanism.logger.error("Cloudworks script machine finalization failed", failure);
+                Mekanism.logger.error("Cloudworks script machine finalization failed", failure);
             }
             for (Runnable declaration : FINAL_DECLARATIONS) applyOne(declaration);
         } finally {
@@ -45,7 +47,7 @@ public final class CloudworksScriptRegistry {
         try {
             declaration.run();
         } catch (RuntimeException failure) {
-            mekanism.common.Mekanism.logger.error("Cloudworks script declaration failed", failure);
+            Mekanism.logger.error("Cloudworks script declaration failed", failure);
         }
     }
 }

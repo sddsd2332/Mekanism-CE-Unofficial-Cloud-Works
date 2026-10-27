@@ -2,37 +2,63 @@ package mekanism.cloudworks.common.service;
 
 import java.util.*;
 import java.util.concurrent.Callable;
+
 import mekanism.api.infuse.InfuseObject;
 import mekanism.api.infuse.InfuseRegistry;
 import mekanism.api.qio.resource.QIOResourceCodecs;
 import mekanism.api.qio.resource.QIOResourceDescriptor;
-import mekanism.cloudworks.api.CloudworksEnergyGenerator;
-import mekanism.cloudworks.api.CloudworksGenerationContext;
-import mekanism.cloudworks.api.CloudworksGenerationPlan;
-import mekanism.cloudworks.api.CloudworksMachineAdapter;
+import mekanism.cloudworks.api.*;
+import mekanism.cloudworks.api.card.*;
+import mekanism.cloudworks.api.environment.*;
+import mekanism.cloudworks.api.machine.*;
+import mekanism.cloudworks.api.module.*;
+import mekanism.cloudworks.api.node.*;
+import mekanism.cloudworks.api.recipe.*;
+import mekanism.cloudworks.api.transfer.*;
+import mekanism.cloudworks.api.work.*;
 import mekanism.cloudworks.common.data.MachineNodeData;
 import mekanism.cloudworks.common.recipe.*;
 import mekanism.cloudworks.common.registry.*;
+import mekanism.cloudworks.common.upgrade.CloudworksMachineModuleRegistry;
 import mekanism.common.InfuseStorage;
 import mekanism.common.recipe.RecipeHandler;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.nbt.NBTTagList;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.function.Predicate;
+import mekanism.cloudworks.common.config.CloudworksConfig;
+import mekanism.cloudworks.common.data.CloudworksData;
+import mekanism.cloudworks.common.data.CloudworksInventory;
+import mekanism.cloudworks.common.data.CloudworksResourceStack;
+import mekanism.cloudworks.common.data.ProductionLineData;
+import mekanism.cloudworks.common.upgrade.CloudworksUpgradeEffects;
+import mekanism.common.Mekanism;
 
-/** Native callbacks freeze on the server thread once per registry generation. */
+/**
+ * Native callbacks freeze on the server thread once per registry generation.
+ */
 public final class CloudworksNativeContracts {
     private static final ThreadLocal<Boolean> WORKER = ThreadLocal.withInitial(() -> false);
     private static final ThreadLocal<Snapshot> PINNED = new ThreadLocal<>();
     private static volatile Snapshot current;
+    private static final Set<String> refusedGenerators = ConcurrentHashMap.newKeySet();
 
-    private CloudworksNativeContracts() {}
+    private CloudworksNativeContracts() {
+    }
 
     public static synchronized void refresh() {
         if (WORKER.get()) throw new IllegalStateException("Native capture requested by Runtime worker");
         long registry = CloudworksRegistries.version();
         int recipes = RecipeHandler.getGlobalRecipeVersion();
-        int infuseVersion = InfuseRegistry.getObjectMap().hashCode();
-        int[] upgrades = mekanism.cloudworks.common.upgrade.CloudworksUpgradeEffects.settings();
+        // InfuseRegistry is populated during startup and exposes no mutation
+        // counter. Use the map identity and size as a cheap generation marker;
+        // hashing every entry on every server tick made refresh O(n) even when
+        // the native registry was unchanged.
+        Map<ItemStack, InfuseObject> infuseMap = InfuseRegistry.getObjectMap();
+        int infuseVersion = 31 * System.identityHashCode(infuseMap) + infuseMap.size();
+        int[] upgrades = CloudworksUpgradeEffects.settings();
         if (current != null && current.registry == registry && current.recipes == recipes
                 && current.infuseVersion == infuseVersion && Arrays.equals(upgrades, current.upgradeSettings)) return;
         Map<Object, Optional<CloudworksFrozenRecipeView>> views = new IdentityHashMap<>();
@@ -46,13 +72,14 @@ public final class CloudworksNativeContracts {
                 view.ifPresent(frozen -> entries.addAll(frozen.entries()));
             }
         });
-        CloudworksRegistries.specialSnapshot().forEach((machine, adapter) -> {
-            Optional<CloudworksFrozenRecipeView> view = views.computeIfAbsent(adapter,
-                    ignored -> CloudworksAsyncRecipeAdmission.captureSpecial(adapter));
-            view.ifPresent(frozen -> byMachine.computeIfAbsent(itemKey(
-                    machine.displayStack().writeToNBT(new NBTTagCompound())), ignored -> new ArrayList<>())
+        for (CloudworksMachineAdapter adapter : CloudworksNodeMechanisms.frozenAdapters()) {
+            CloudworksMachineRegistration registration = CloudworksMachineAdapters.registration(adapter);
+            Optional<CloudworksFrozenRecipeView> view = CloudworksAsyncRecipeAdmission.peek(adapter);
+            views.put(adapter, view);
+            view.ifPresent(frozen -> byMachine.computeIfAbsent(
+                            itemKey(registration.machine().writeToNBT(new NBTTagCompound())), ignored -> new ArrayList<>())
                     .addAll(frozen.entries()));
-        });
+        }
         List<Infusion> infusions = new ArrayList<>();
         Map<String, List<NativeMachine>> machines = new HashMap<>();
         for (MachineKey key : CloudworksRegistries.profileSnapshot().keySet()) {
@@ -72,7 +99,10 @@ public final class CloudworksNativeContracts {
         current = new Snapshot(registry, recipes, infuseVersion, views, infusions, byMachine, upgrades, machines);
     }
 
-    public static synchronized void clear() { current = null; }
+    public static synchronized void clear() {
+        current = null;
+        refusedGenerators.clear();
+    }
 
     private static Snapshot snapshot() {
         Snapshot snapshot = WORKER.get() ? PINNED.get() : current;
@@ -85,11 +115,8 @@ public final class CloudworksNativeContracts {
     }
 
     public static Optional<CloudworksFrozenRecipeView> view(CloudworksMachineAdapter adapter) {
-        return snapshot().views.getOrDefault(adapter, Optional.empty());
-    }
-
-    public static Optional<CloudworksFrozenRecipeView> special(SpecialMachineAdapter adapter) {
-        return snapshot().views.getOrDefault(adapter, Optional.empty());
+        Optional<CloudworksFrozenRecipeView> frozen = snapshot().views.get(adapter);
+        return frozen != null ? frozen : CloudworksAsyncRecipeAdmission.peek(adapter);
     }
 
     public static Infusion infusion(QIOResourceDescriptor resource) {
@@ -99,9 +126,29 @@ public final class CloudworksNativeContracts {
     }
 
     public static void prime(CloudworksResourceSymbols symbols, CloudworksPlayerDataManager.VirtualSnapshot origin) {
+        prime(symbols, origin, origin.lines());
+    }
+
+    /** Capture-scoped decoded lines, owned by the caller until compilation completes. */
+    public static void prime(CloudworksResourceSymbols symbols, CloudworksPlayerDataManager.VirtualSnapshot origin,
+                             List<ProductionLineData> decodedLines) {
         Snapshot snapshot = snapshot();
-        mekanism.cloudworks.common.data.CloudworksData cloud = origin.cloud();
-        for (mekanism.cloudworks.common.data.CloudworksInventory inventory : Arrays.asList(
+        Set<CloudworksFrozenRecipeView> primed = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (MachineModuleType<?> type : CloudworksMachineModuleRegistry.snapshot().values())
+            for (QIOResourceDescriptor output : type.module().outputResources()) remember(symbols, output);
+        for (ProductionLineData line : decodedLines)
+            for (MachineNodeData node : line.machines())
+                for (mekanism.cloudworks.common.data.CloudworksResourceCredit credit : node.processCredits().values()) remember(symbols, credit.resource);
+        for (ProductionLineData line : decodedLines)
+            for (MachineNodeData node : line.machines())
+                for (CloudworksMachineAdapter adapter : node.capabilities().allAdapters())
+                    CloudworksAsyncRecipeAdmission.peek(adapter).ifPresent(view -> {
+                        if (primed.add(view))
+                            for (QIOResourceDescriptor resource : snapshot.primeResources.computeIfAbsent(view,
+                                    CloudworksNativeContracts::primeResources)) remember(symbols, resource);
+                    });
+        CloudworksData cloud = origin.cloud();
+        for (CloudworksInventory inventory : Arrays.asList(
                 cloud.receiving(), cloud.transfer(), cloud.sending()))
             inventory.snapshot().keySet().forEach(symbols::id);
         origin.visitDescriptorTags(tag -> remember(symbols, QIOResourceDescriptor.read(tag)));
@@ -126,7 +173,28 @@ public final class CloudworksNativeContracts {
 
     private static void remember(CloudworksResourceSymbols symbols, QIOResourceDescriptor resource) {
         symbols.id(resource);
-        snapshot().resources.put(resource.write().toString(), resource);
+        Snapshot snapshot = snapshot();
+        // Descriptor.toString() is its constructor-frozen serialization identity;
+        // do not use codec semantic equality, which can ignore persistent metadata.
+        snapshot.resourceKeys.computeIfAbsent(resource.toString(), ignored -> {
+            String serialized = resource.write().toString();
+            snapshot.resources.put(serialized, resource);
+            return serialized;
+        });
+    }
+
+    private static List<QIOResourceDescriptor> primeResources(CloudworksFrozenRecipeView view) {
+        Map<String, QIOResourceDescriptor> resources = new LinkedHashMap<>();
+        for (CloudworksFrozenRecipeView.Entry entry : view.entries()) {
+            if (entry.definition() != null && entry.definition().creditResource() != null) {
+                QIOResourceDescriptor resource = entry.definition().creditResource();
+                resources.put(resource.toString(), resource);
+            }
+            entry.outputTemplate().forEach(output -> resources.put(output.descriptor().toString(), output.descriptor()));
+            entry.chanceOutputTemplate().forEach(output -> resources.put(output.descriptor().toString(), output.descriptor()));
+            entry.choiceOutputTemplate().forEach(output -> resources.put(output.descriptor().toString(), output.descriptor()));
+        }
+        return Collections.unmodifiableList(new ArrayList<>(resources.values()));
     }
 
     public static QIOResourceDescriptor resource(NBTTagCompound tag) {
@@ -144,45 +212,91 @@ public final class CloudworksNativeContracts {
         Snapshot previousSnapshot = PINNED.get();
         PINNED.set(current);
         WORKER.set(true);
-        try { return work.call(); }
-        finally {
+        try {
+            return work.call();
+        } finally {
             WORKER.set(previous);
-            if (previousSnapshot == null) PINNED.remove(); else PINNED.set(previousSnapshot);
+            if (previousSnapshot == null) PINNED.remove();
+            else PINNED.set(previousSnapshot);
         }
     }
 
     public static Map<UUID, CloudworksGenerationPlan> generationPlans(CloudworksPlayerDataManager.VirtualSnapshot origin,
-            CloudworksGenerationContext context) {
+                                                                      CloudworksGenerationContext context) {
+        return generationPlans(origin, context, origin.lines());
+    }
+
+    public static Map<UUID, CloudworksGenerationPlan> generationPlans(CloudworksPlayerDataManager.VirtualSnapshot origin,
+            CloudworksGenerationContext context, List<ProductionLineData> decodedLines) {
         if (WORKER.get()) throw new IllegalStateException("Native generator called by Runtime worker");
         Map<UUID, CloudworksGenerationPlan> plans = new HashMap<>();
         int workRate = Math.min(origin.cloud().workRate(),
-                mekanism.cloudworks.common.config.CloudworksConfig.settings().maxWorkRate);
-        Map<String, Set<Integer>> supported = new HashMap<>();
-        for (MachineKey key : CloudworksRegistries.generatorSnapshot().keySet()) {
-            NBTTagCompound encoded = key.displayStack().writeToNBT(new NBTTagCompound());
-            supported.computeIfAbsent(encoded.getString("id"), ignored -> new HashSet<>())
-                    .add((int) encoded.getShort("Damage"));
-        }
-        origin.visitNodeTags(tag -> {
-            NBTTagCompound machine = tag.getCompoundTag("machine");
-            if (!tag.getBoolean("active") || !supported.getOrDefault(machine.getString("id"), Collections.emptySet())
-                    .contains((int) machine.getShort("Damage"))) return;
-            MachineNodeData node = MachineNodeData.read(tag);
+                CloudworksConfig.settings().maxWorkRate);
+        for (ProductionLineData line : decodedLines) for (MachineNodeData node : line.machines()) {
+            if (!node.active()) continue;
             CloudworksEnergyGenerator generator = node.capabilities().generator();
-            if (generator != null && generator.enabled(node)) {
-                MachineExecutionProfile profile = node.capabilities().profile();
-                long units = CloudworksQuantities.multiplyLimit(
-                        CloudworksQuantities.multiplyLimit(node.machineCount(), profile == null ? 1 : profile.threads()),
-                        workRate);
-                if (units > Integer.MAX_VALUE) throw new IllegalArgumentException("Generator unit overflow");
-                plans.put(node.nodeId(), generator.freezeGeneration(node, (int) units, context));
+            if (generator == null && node.capabilities().branches().stream().noneMatch(branch -> branch.generator != null))
+                continue;
+            CloudworksGenerationContext environment = CloudworksNodeEnvironment.generation(line, node, context);
+            if (generator != null && node.active()) {
+                plans.put(node.nodeId(), freezeGeneration(node, generator, node.capabilities().profile(), workRate, environment));
             }
-        });
+            for (CloudworksNodeMechanisms.Branch branch : node.capabilities().branches())
+                if (branch.generator != null && node.active())
+                    plans.put(CloudworksNodeMechanisms.branchId(node.nodeId(), branch.id),
+                            freezeGeneration(node, branch.generator, branch.profile, workRate, environment));
+        }
         return Collections.unmodifiableMap(plans);
     }
 
-    public static boolean isWorker() { return WORKER.get(); }
-    public static int[] upgradeSettings() { return snapshot().upgradeSettings.clone(); }
+    private static CloudworksGenerationPlan freezeGeneration(MachineNodeData node, CloudworksEnergyGenerator generator,
+                                                             MachineExecutionProfile profile, int workRate, CloudworksGenerationContext context) {
+        try {
+            long units = CloudworksQuantities.multiplyLimit(
+                    CloudworksQuantities.multiplyLimit(node.machineCount(), profile == null ? 1 : profile.threads()), workRate);
+            if (units > Integer.MAX_VALUE) throw new IllegalArgumentException("Generator unit overflow");
+            CloudworksGenerationPlan plan = Objects.requireNonNull(generator.freeze(new CloudworksMachineContext(
+                            node.nodeId(), node.machine(), node.machineCount(), node.active(),
+                            node.recipeType(), amounts(node.inputs()), amounts(node.outputs()), amounts(node.templates())), (int) units,
+                    context));
+            for (CloudworksGenerationPlan.ResourceOutput output : plan.resourceOutputs()) {
+                boolean port = false;
+                for (MachineSlotLayout.Slot slot : node.capabilities().slots().slots())
+                    port |= slot.role() == MachineSlotLayout.PortRole.OUTPUT
+                            && slot.codecId().equals(output.resource().getCodecId())
+                            && (output.port().isEmpty() || slot.id().equals(output.port()));
+                if (!port) throw new IllegalArgumentException("Generation resource lacks an output port");
+            }
+            return plan;
+        } catch (RuntimeException | LinkageError failure) {
+            String key = generator.getClass().getName() + "|" + failure.getClass().getName() + "|" + failure.getMessage();
+            if (refusedGenerators.add(key))
+                Mekanism.logger.error("Cloudworks generation contract refused for node " + node.nodeId(), failure);
+            return CloudworksGenerationPlan.unsupported();
+        }
+    }
+
+    public static void primeGeneration(CloudworksResourceSymbols symbols, Map<UUID, CloudworksGenerationPlan> plans) {
+        if (WORKER.get()) throw new IllegalStateException("Generation resources must prime before worker dispatch");
+        for (CloudworksGenerationPlan plan : plans.values())
+            for (CloudworksGenerationPlan.ResourceOutput output : plan.resourceOutputs())
+                remember(symbols, output.resource());
+    }
+
+    public static boolean isWorker() {
+        return WORKER.get();
+    }
+
+    private static Map<QIOResourceDescriptor, Long> amounts(List<CloudworksResourceStack> values) {
+        Map<QIOResourceDescriptor, Long> result = new LinkedHashMap<>();
+        for (CloudworksResourceStack value : values)
+            result.merge(value.descriptor(), value.amount(), Math::addExact);
+        return result;
+    }
+
+    public static int[] upgradeSettings() {
+        return snapshot().upgradeSettings.clone();
+    }
 
     public static MachineNodeData machine(NBTTagCompound item) {
         for (NativeMachine template : snapshot().machines.getOrDefault(itemKey(item), Collections.emptyList())) {
@@ -192,7 +306,7 @@ public final class CloudworksNativeContracts {
         throw new IllegalArgumentException("Unknown frozen Runtime machine");
     }
 
-    public static java.util.function.Predicate<NBTTagCompound> thermalFuelMatcher() {
+    public static Predicate<NBTTagCompound> thermalFuelMatcher() {
         Snapshot frozen = snapshot();
         return item -> {
             for (NativeMachine template : frozen.machines.getOrDefault(itemKey(item), Collections.emptyList())) {
@@ -201,6 +315,29 @@ public final class CloudworksNativeContracts {
             }
             return false;
         };
+    }
+
+    public static boolean moduleHeatFuel(NBTTagCompound node) {
+        MachineNodeData decoded = MachineNodeData.read(node);
+        if (heatFuel(decoded.capabilities().thermal())) return true;
+        for (CloudworksNodeMechanisms.Branch branch :
+                decoded.capabilities().branches())
+            if (heatFuel(branch.thermal)) return true;
+        return false;
+    }
+
+    private static boolean moduleGenerator(NBTTagCompound node) {
+        MachineNodeData decoded = MachineNodeData.read(node);
+        if (decoded.capabilities().generator() != null) return true;
+        for (CloudworksNodeMechanisms.Branch branch :
+                decoded.capabilities().branches())
+            if (branch.generator != null) return true;
+        return false;
+    }
+
+    private static boolean heatFuel(CloudworksThermalPlan plan) {
+        return plan != null && (plan.kind == CloudworksThermalPlan.Kind.FUELWOOD
+                || plan.kind == CloudworksThermalPlan.Kind.HEAT_GENERATOR);
     }
 
     public static final class Infusion {
@@ -235,12 +372,15 @@ public final class CloudworksNativeContracts {
         final int[] upgradeSettings;
         final Map<String, List<CloudworksFrozenRecipeView.Entry>> byMachine;
         final Map<String, List<NativeMachine>> machines;
-        final java.util.concurrent.ConcurrentMap<String, QIOResourceDescriptor> resources =
-                new java.util.concurrent.ConcurrentHashMap<>();
+        final ConcurrentMap<String, QIOResourceDescriptor> resources =
+                new ConcurrentHashMap<>();
+        final ConcurrentMap<String, String> resourceKeys = new ConcurrentHashMap<>();
+        final ConcurrentMap<CloudworksFrozenRecipeView, List<QIOResourceDescriptor>> primeResources = new ConcurrentHashMap<>();
+
         Snapshot(long registry, int recipes, int infuseVersion,
-                Map<Object, Optional<CloudworksFrozenRecipeView>> views, List<Infusion> infusions,
-                Map<String, List<CloudworksFrozenRecipeView.Entry>> byMachine, int[] upgradeSettings,
-                Map<String, List<NativeMachine>> machines) {
+                 Map<Object, Optional<CloudworksFrozenRecipeView>> views, List<Infusion> infusions,
+                 Map<String, List<CloudworksFrozenRecipeView.Entry>> byMachine, int[] upgradeSettings,
+                 Map<String, List<NativeMachine>> machines) {
             this.registry = registry;
             this.recipes = recipes;
             this.infuseVersion = infuseVersion;
@@ -261,14 +401,14 @@ public final class CloudworksNativeContracts {
         final MachineKey key;
         final MachineIdentityPolicy policy;
         final boolean thermalFuel;
+
         NativeMachine(MachineNodeData node, MachineKey key, MachineIdentityPolicy policy) {
             this.node = node;
             this.key = key;
             this.policy = policy;
-            mekanism.cloudworks.api.CloudworksThermalPlan plan = node.capabilities().thermal();
-            thermalFuel = plan != null && (plan.kind == mekanism.cloudworks.api.CloudworksThermalPlan.Kind.FUELWOOD
-                    || plan.kind == mekanism.cloudworks.api.CloudworksThermalPlan.Kind.HEAT_GENERATOR)
-                    || node.capabilities().special() instanceof mekanism.cloudworks.common.recipe.CloudworksHeatFuelAdapter;
+            CloudworksThermalPlan plan = node.capabilities().thermal();
+            thermalFuel = plan != null && (plan.kind == CloudworksThermalPlan.Kind.FUELWOOD
+                    || plan.kind == CloudworksThermalPlan.Kind.HEAT_GENERATOR);
         }
     }
 }

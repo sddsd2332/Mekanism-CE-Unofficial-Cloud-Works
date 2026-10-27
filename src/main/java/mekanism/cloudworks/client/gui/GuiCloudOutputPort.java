@@ -12,7 +12,7 @@ import mekanism.client.gui.element.tab.GuiEnergyTab;
 import mekanism.client.gui.warning.WarningTracker.WarningType;
 import mekanism.client.render.MekanismRenderer;
 import mekanism.cloudworks.common.content.CloudworksWindowTypes;
-import mekanism.cloudworks.common.tile.TileEntityCloudOutput;
+import mekanism.cloudworks.common.tile.prefab.TileEntityCloudworksPort;
 import mekanism.cloudworks.common.inventory.container.ContainerCloudOutputPort;
 import mekanism.cloudworks.client.gui.element.tab.GuiCloudPortQIOFrequencyTab;
 import net.minecraft.entity.player.EntityPlayer;
@@ -26,6 +26,9 @@ import net.minecraftforge.fml.relauncher.SideOnly;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import mekanism.api.gas.GasStack;
+import mekanism.cloudworks.common.content.CloudworksHybridTank;
+import mekanism.common.inventory.container.SelectedWindowData;
 
 /**
  * Download-port main screen: the upload screen mirrored — two dynamic buffer
@@ -35,7 +38,7 @@ import java.util.List;
  * extracted.
  */
 @SideOnly(Side.CLIENT)
-public class GuiCloudOutputPort extends GuiConfigurableTile<TileEntityCloudOutput, ContainerCloudOutputPort> {
+public class GuiCloudOutputPort extends GuiConfigurableTile<TileEntityCloudworksPort, ContainerCloudOutputPort> {
 
     private static final ResourceLocation CLOUD_MOTIF = new ResourceLocation("cloudworks", "textures/gui/cloud_motif.png");
 
@@ -43,7 +46,7 @@ public class GuiCloudOutputPort extends GuiConfigurableTile<TileEntityCloudOutpu
     private GuiPortOutTanksWindow tanksWindow;
     private GuiCloudPortQIOFrequencyTab qioFrequencyTab;
 
-    public GuiCloudOutputPort(EntityPlayer player, TileEntityCloudOutput tile) {
+    public GuiCloudOutputPort(EntityPlayer player, TileEntityCloudworksPort tile) {
         super(tile, new ContainerCloudOutputPort(player.inventory, tile));
         dynamicSlots = true;
         titleLabelY = 4;
@@ -100,9 +103,9 @@ public class GuiCloudOutputPort extends GuiConfigurableTile<TileEntityCloudOutpu
 
     private List<MachineResourceStack> getDisplayedTanks() {
         List<MachineResourceStack> resources = new ArrayList<>();
-        for (mekanism.cloudworks.common.content.CloudworksHybridTank tank : tileEntity.portTanks()) {
+        for (CloudworksHybridTank tank : tileEntity.portTanks()) {
             FluidStack fluid = tank.getFluid();
-            mekanism.api.gas.GasStack gas = tank.getGas();
+            GasStack gas = tank.getGas();
             if (fluid != null) mergeResource(resources, MachineResourceStack.fluid("port_tank", fluid, fluid.amount));
             else if (gas != null) mergeResource(resources, MachineResourceStack.gas("port_tank", gas, gas.amount));
         }
@@ -134,10 +137,10 @@ public class GuiCloudOutputPort extends GuiConfigurableTile<TileEntityCloudOutpu
     @Override
     protected void initPinnedWindows() {
         super.initPinnedWindows();
-        if (new mekanism.common.inventory.container.SelectedWindowData(CloudworksWindowTypes.PORT_OUT_ITEMS).wasPinned()) {
+        if (new SelectedWindowData(CloudworksWindowTypes.PORT_OUT_ITEMS).wasPinned()) {
             openItemsWindow();
         }
-        if (new mekanism.common.inventory.container.SelectedWindowData(CloudworksWindowTypes.PORT_OUT_TANKS).wasPinned()) {
+        if (new SelectedWindowData(CloudworksWindowTypes.PORT_OUT_TANKS).wasPinned()) {
             openTanksWindow();
         }
     }
@@ -149,5 +152,4 @@ public class GuiCloudOutputPort extends GuiConfigurableTile<TileEntityCloudOutpu
         super.drawForegroundText(mouseX, mouseY);
     }
 }
-
 

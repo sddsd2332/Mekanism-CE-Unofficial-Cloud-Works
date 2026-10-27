@@ -6,7 +6,7 @@ import mekanism.client.gui.element.gauge.GuiHybridGauge;
 import mekanism.client.gui.element.window.GuiWindow;
 import mekanism.cloudworks.common.content.CloudworksHybridTank;
 import mekanism.cloudworks.common.content.CloudworksWindowTypes;
-import mekanism.cloudworks.common.tile.TileEntityCloudOutput;
+import mekanism.cloudworks.common.tile.prefab.TileEntityCloudworksPort;
 import mekanism.common.inventory.container.SelectedWindowData;
 import net.minecraft.util.text.TextComponentTranslation;
 import net.minecraftforge.fml.relauncher.Side;
@@ -25,7 +25,7 @@ public class GuiPortOutTanksWindow extends GuiWindow {
     private static final int COLUMNS = 6;
     private static final int ROWS = 6;
 
-    public GuiPortOutTanksWindow(IGuiWrapper gui, int x, int y, TileEntityCloudOutput tile) {
+    public GuiPortOutTanksWindow(IGuiWrapper gui, int x, int y, TileEntityCloudworksPort tile) {
         super(gui, x, y, COLUMNS * 18 + 16, ROWS * 18 + 28, new SelectedWindowData(CloudworksWindowTypes.PORT_OUT_TANKS));
         interactionStrategy = InteractionStrategy.ALL;
         for (int tank = 0; tank < COLUMNS * ROWS; tank++) {
@@ -46,4 +46,3 @@ public class GuiPortOutTanksWindow extends GuiWindow {
         drawTitleText(new TextComponentTranslation("gui.cloudworks.port_out_tanks"), 5);
     }
 }
-

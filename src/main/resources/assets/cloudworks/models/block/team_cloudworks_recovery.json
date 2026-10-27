@@ -1,0 +1,4 @@
+{
+  "parent": "block/cube_all",
+  "textures": { "all": "cloudworks:blocks/hybrid_storage/side" }
+}

@@ -1,0 +1,10 @@
+{
+  "type": "forge:ore_shaped",
+  "pattern": [" Q ", "ACA", " Q "],
+  "key": {
+    "Q": { "item": "minecraft:quartz" },
+    "A": { "item": "mekanism:enrichedalloy" },
+    "C": { "item": "minecraft:prismarine_shard" }
+  },
+  "result": { "item": "cloudworks:cloud_weather_card" }
+}

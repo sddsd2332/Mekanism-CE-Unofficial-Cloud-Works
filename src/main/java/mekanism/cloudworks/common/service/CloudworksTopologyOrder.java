@@ -38,6 +38,6 @@ public final class CloudworksTopologyOrder {
                 if (remaining == 0) ready.add(next);
             }
         }
-        return result.size() == nodes.size() ? result : java.util.Collections.emptyList();
+        return result.size() == nodes.size() ? result : Collections.emptyList();
     }
 }

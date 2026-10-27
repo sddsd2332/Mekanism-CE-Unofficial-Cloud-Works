@@ -7,13 +7,11 @@ import java.util.Objects;
 
 public final class CloudworksResourceStack {
     private final QIOResourceDescriptor descriptor;
-    private final NBTTagCompound value;
     private long amount;
     private long reserved;
 
     public CloudworksResourceStack(QIOResourceDescriptor descriptor, long amount) {
         this.descriptor = Objects.requireNonNull(descriptor);
-        this.value = descriptor.getPayload();
         if (amount < 0) throw new IllegalArgumentException("Negative resource quantity");
         this.amount = amount;
     }
@@ -41,7 +39,9 @@ public final class CloudworksResourceStack {
     }
 
     public NBTTagCompound value() {
-        return value.copy();
+        // The descriptor is immutable and already owns the canonical payload.
+        // Defer its defensive copy until a real payload consumer asks for it.
+        return descriptor.getPayload();
     }
 
     public long amount() {

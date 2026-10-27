@@ -1,10 +1,11 @@
 package mekanism.cloudworks.common.integration.crafttweaker;
 
 import crafttweaker.annotations.ZenRegister;
-import mekanism.cloudworks.common.slot.MachineSlotLayout;
+import mekanism.cloudworks.api.machine.MachineSlotLayout;
 import net.minecraft.util.ResourceLocation;
 import stanhebben.zenscript.annotations.ZenClass;
 import stanhebben.zenscript.annotations.ZenMethod;
+import java.util.Locale;
 
 @ZenClass("mods.cloudworks.Slots")
 @ZenRegister
@@ -26,6 +27,13 @@ public final class CloudworksSlots {
         return this;
     }
 
+    /** Whether a declared input accepts only effective recipe inputs. */
+    @ZenMethod
+    public CloudworksSlots recipeFilteredInput(String port, boolean enabled) {
+        layout.recipeFilteredInput(port, enabled);
+        return this;
+    }
+
     @ZenMethod
     public CloudworksSlots template(String id, String codec, int capacity) {
         layout.add(id, new ResourceLocation(codec), MachineSlotLayout.PortRole.CONFIGURATION, capacity);
@@ -34,7 +42,7 @@ public final class CloudworksSlots {
 
     @ZenMethod
     public CloudworksSlots add(String id, String codec, String role, int capacity, boolean multipleConnections) {
-        layout.add(id, new ResourceLocation(codec), MachineSlotLayout.PortRole.valueOf(role.toUpperCase(java.util.Locale.ROOT)),
+        layout.add(id, new ResourceLocation(codec), MachineSlotLayout.PortRole.valueOf(role.toUpperCase(Locale.ROOT)),
                 capacity, multipleConnections);
         return this;
     }

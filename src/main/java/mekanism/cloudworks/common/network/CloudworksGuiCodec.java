@@ -7,13 +7,25 @@ import java.util.List;
 import java.util.UUID;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
+
+import mekanism.cloudworks.api.recipe.RecipeContribution;
 import mekanism.cloudworks.common.network.data.CloudworksGuiData;
 import mekanism.cloudworks.common.network.data.CloudworksGuiData.*;
+import mekanism.cloudworks.common.network.data.node.AuxiliaryNode;
+import mekanism.cloudworks.common.network.data.node.ChannelNode;
+import mekanism.cloudworks.common.network.data.node.MachineNode;
+import mekanism.cloudworks.common.network.data.node.Node;
 import mekanism.common.PacketHandler;
 import mekanism.common.content.qio.QIOResourceEntry;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.network.PacketBuffer;
+import mekanism.cloudworks.api.machine.MachineSlotLayout;
+import mekanism.cloudworks.common.data.CloudworksThermalState;
+import mekanism.cloudworks.common.data.CloudworksUpgradeSet;
+import mekanism.cloudworks.common.network.data.CloudworksLineDraft;
+import mekanism.cloudworks.common.service.CloudworksOutputMultiplier;
+import net.minecraft.util.ResourceLocation;
 
 /** Business fields use an explicit wire format; only resource templates retain their native encoding. */
 public final class CloudworksGuiCodec {
@@ -100,6 +112,7 @@ public final class CloudworksGuiCodec {
         b.writeInt(value.unlocked);
         b.writeInt(value.maximum);
         b.writeInt(value.workRate);
+        b.writeInt(value.outputMultiplierUnits);
         b.writeLong(value.revision);
         b.writeDouble(value.energy);
         b.writeDouble(value.maxEnergy);
@@ -114,14 +127,19 @@ public final class CloudworksGuiCodec {
         b.writeInt(value.speedUpgradePool);
         b.writeInt(value.energyUpgradePool);
         b.writeInt(value.clockTick);
-        b.writeInt(value.simulatedHeight);
-        b.writeInt(value.lavaHeatCards);
         b.writeInt(value.maxMachineNodes);
         b.writeInt(value.machineNodeLimit);
         b.writeLong(value.maxMachinesPerNode);
         b.writeBoolean(value.recycleToTransfer);
         b.writeBoolean(value.offlineUnlocked);
-        b.writeBoolean(value.netherEnvironment);
+        b.writeInt(value.netherHeatSourcesUsed);
+        writeList(b, value.infiniteResources, (buffer, resource) -> {
+            CloudworksLineDraftCodec.resource(buffer, resource.descriptor);
+            buffer.writeBoolean(resource.unlimitedPlacement);
+            buffer.writeLong(resource.nodeLimit);
+            buffer.writeLong(resource.usedOutsideLine);
+            buffer.writeLong(resource.outputAmount);
+        });
         writeList(b, value.lines, (buffer, line) -> {
             uuid(buffer, line.id);
             buffer.writeString(line.name);
@@ -136,11 +154,40 @@ public final class CloudworksGuiCodec {
             buffer.writeBoolean(line.runWhileOwnerOffline);
             writeList(buffer, line.markers, CloudworksLineDraftCodec::resource);
         });
+        b.writeBoolean(value.team.id != null);
+        if (value.team.id != null) {
+            uuid(b, value.team.id);
+            b.writeString(value.team.name);
+            b.writeBoolean(value.team.owner != null);
+            if (value.team.owner != null) uuid(b, value.team.owner);
+            writeList(b, value.team.members, (buffer, member) -> {
+                uuid(buffer, member.id);
+                buffer.writeString(member.name);
+                buffer.writeBoolean(member.online);
+                buffer.writeBoolean(member.allowed);
+            });
+        }
+        b.writeString(value.team.ftbBinding);
+        b.writeBoolean(value.team.ftbAvailable);
+        b.writeString(value.team.joinMode);
+        b.writeInt(value.team.color);
+        writeList(b, value.team.requests, (buffer, request) -> {
+            uuid(buffer, request.id);
+            buffer.writeString(request.name);
+        });
+        b.writeBoolean(value.customUpgrades != null);
+        if (value.customUpgrades != null)
+            writeList(b, value.customUpgrades, CloudworksGuiCodec::writeCustomUpgrade);
+        writeList(b, value.effectLevels, (buffer, entry) -> {
+            buffer.writeString(entry.id);
+            buffer.writeLong(entry.level);
+        });
     }
 
     private static Overview readOverview(PacketBuffer b) {
         int offset = nonnegative(b.readInt()), total = nonnegative(b.readInt());
         int unlocked = nonnegative(b.readInt()), maximum = nonnegative(b.readInt()), rate = nonnegative(b.readInt());
+        int outputMultiplier = CloudworksOutputMultiplier.validate(b.readInt());
         long revision = nonnegative(b.readLong());
         double energy = energy(b.readDouble()), capacity = b.readDouble();
         boolean unlimited = b.readBoolean();
@@ -153,13 +200,17 @@ public final class CloudworksGuiCodec {
         int speed = nonnegative(b.readInt()), upgrades = nonnegative(b.readInt());
         int clockTick = b.readInt();
         if (clockTick < 1 || clockTick > 24000) throw new IllegalArgumentException("Invalid cloud clock");
-        int height = nonnegative(b.readInt()), lava = nonnegative(b.readInt()), maxNodes = nonnegative(b.readInt());
-        if (height > 256 || lava > 7 || maxNodes < 1) throw new IllegalArgumentException("Invalid cloud status");
+        int maxNodes = nonnegative(b.readInt());
+        if (maxNodes < 1) throw new IllegalArgumentException("Invalid cloud status");
         int nodeLimit = nonnegative(b.readInt());
         long machinesPerNode = nonnegative(b.readLong());
         if (nodeLimit < 1 || machinesPerNode < 1) throw new IllegalArgumentException("Invalid machine limits");
         boolean recycleToTransfer = b.readBoolean();
-        boolean offline = b.readBoolean(), nether = b.readBoolean();
+        boolean offline = b.readBoolean();
+        int netherUsed = nonnegative(b.readInt());
+        List<SpecialResource> infiniteResources = readList(b, MAX_ENTRIES,
+                buffer -> new SpecialResource(CloudworksLineDraftCodec.resource(buffer), buffer.readBoolean(),
+                        buffer.readLong(), buffer.readLong(), buffer.readLong()));
         List<Line> lines = readList(b, 32, buffer -> {
             Line line = new Line(uuid(buffer), buffer.readString(64),
                 buffer.readBoolean(), buffer.readBoolean(), nonnegative(buffer.readInt()),
@@ -168,12 +219,49 @@ public final class CloudworksGuiCodec {
             line.markers.addAll(readList(buffer, 25, CloudworksLineDraftCodec::resource));
             return line;
         });
+        Team team = Team.EMPTY;
+        if (b.readBoolean()) {
+            UUID id = uuid(b);
+            String name = b.readString(128);
+            UUID owner = b.readBoolean() ? uuid(b) : null;
+            List<Member> members = readList(b, MAX_ENTRIES,
+                    buffer -> new Member(uuid(buffer), buffer.readString(128), buffer.readBoolean(), buffer.readBoolean()));
+            team = new Team(id, name, owner, members);
+        }
+        String binding = b.readString(128);
+        boolean ftbAvailable = b.readBoolean();
+        String joinMode = b.readString(32);
+        if (!"AUTO_JOIN".equals(joinMode) && !"APPROVAL".equals(joinMode) && !"DISABLED".equals(joinMode))
+            throw new IllegalArgumentException("Invalid team join mode");
+        int color = b.readInt();
+        List<TeamRequest> requests = readList(b, MAX_ENTRIES,
+                buffer -> new TeamRequest(uuid(buffer), buffer.readString(64)));
+        team = new Team(team.id, team.name, team.owner, team.members, binding, ftbAvailable,
+                joinMode, color, requests);
+        // The upload catalogue includes zero-count declarations, not only the bounded asset pool.
+        // Byte-derived ceiling: a claimed count may never exceed what the section's bytes can hold.
+        // Absent marker = on-demand catalogue not requested (upgrade window closed).
+        List<CustomUpgrade> customUpgrades = b.readBoolean()
+                ? readList(b, b.readableBytes() / 12, CloudworksGuiCodec::readCustomUpgrade) : null;
+        // Byte-derived ceiling (id string + long level ≥ 12 bytes each): the
+        // write side has no count limit, so the read side must not either.
+        List<EffectLevel> effectLevels = readList(b, b.readableBytes() / 12,
+                buffer -> {
+                    String id = buffer.readString(256);
+                    try {
+                        new ResourceLocation(id);
+                    } catch (Exception invalid) {
+                        throw new IllegalArgumentException("Invalid cloud effect id");
+                    }
+                    return new EffectLevel(id, nonnegative(buffer.readLong()));
+                });
         if (offset > total || lines.size() > total - offset || unlocked > maximum || rate < 1)
             throw new IllegalArgumentException("Invalid cloud directory");
         return new Overview(offset, total, unlocked, maximum, rate, revision, energy, capacity,
                 unlimited, receiving, sending, r2c, c2s, speed, upgrades, clockTick, lines,
-                height, lava, maxNodes, offline, nether, receivingCap, sendingCap, offlineEnabled,
-                nodeLimit, machinesPerNode, recycleToTransfer);
+                maxNodes, offline, receivingCap, sendingCap, offlineEnabled,
+                nodeLimit, machinesPerNode, recycleToTransfer, infiniteResources, outputMultiplier, team,
+                customUpgrades, effectLevels).withNetherSourceUsage(netherUsed);
     }
 
     private static void writeGraph(PacketBuffer b, Graph graph) {
@@ -189,34 +277,7 @@ public final class CloudworksGuiCodec {
         b.writeInt(graph.energyUpgrades);
         b.writeBoolean(graph.configuration != null);
         if (graph.configuration != null) CloudworksLineDraftCodec.write(b, graph.configuration);
-        writeList(b, graph.nodes, (buffer, node) -> {
-            uuid(buffer, node.id);
-            buffer.writeString(node.name);
-            buffer.writeString(node.state);
-            writeStack(buffer, node.icon);
-            buffer.writeInt(node.x);
-            buffer.writeInt(node.z);
-            buffer.writeInt(node.count);
-            buffer.writeInt(node.progress);
-            buffer.writeInt(node.duration);
-            buffer.writeBoolean(node.active);
-            writeSummaries(buffer, node.input);
-            writeSummaries(buffer, node.output);
-            writeSummaries(buffer, node.templates);
-            writeList(buffer, node.ports, (out, port) -> {
-                out.writeString(port.id);
-                out.writeString(port.codec);
-                out.writeBoolean(port.output);
-            });
-            buffer.writeBoolean(node.thermal != null);
-            if (node.thermal != null) {
-                buffer.writeDouble(node.thermal.heat); buffer.writeDouble(node.thermal.capacity);
-                buffer.writeDouble(node.thermal.plasma); buffer.writeDouble(node.thermal.fuelTicks);
-                buffer.writeDouble(node.thermal.credit); buffer.writeDouble(node.thermal.produced);
-                buffer.writeDouble(node.thermal.consumed); buffer.writeDouble(node.thermal.loss);
-                buffer.writeBoolean(node.thermal.burning);
-            }
-        });
+        writeList(b, graph.nodes, CloudworksGuiCodec::writeNode);
         writeList(b, graph.links, (buffer, link) -> {
             uuid(buffer, link.id);
             uuid(buffer, link.sourceNode);
@@ -228,6 +289,7 @@ public final class CloudworksGuiCodec {
             buffer.writeDouble(link.ratio);
             writeList(buffer, link.filterNames, PacketBuffer::writeString);
         });
+        writeList(b, graph.customUpgrades, CloudworksGuiCodec::writeCustomUpgrade);
     }
 
     private static Graph readGraph(PacketBuffer b) {
@@ -237,22 +299,99 @@ public final class CloudworksGuiCodec {
         boolean enabled = b.readBoolean(), routing = b.readBoolean();
         double energy = energy(b.readDouble()), maximum = energy(b.readDouble());
         int speed = nonnegative(b.readInt()), upgrades = nonnegative(b.readInt());
-        mekanism.cloudworks.common.network.data.CloudworksLineDraft configuration =
+        CloudworksLineDraft configuration =
                 b.readBoolean() ? CloudworksLineDraftCodec.read(b) : null;
-        List<Node> nodes = readList(b, b.readableBytes() / 32, buffer -> new Node(uuid(buffer), buffer.readString(512),
-                buffer.readString(128), readStack(buffer), buffer.readInt(), buffer.readInt(),
-                nonnegative(buffer.readInt()), nonnegative(buffer.readInt()), nonnegative(buffer.readInt()),
-                buffer.readBoolean(), readSummaries(buffer), readSummaries(buffer), readSummaries(buffer),
-                readList(buffer, 1024, in -> new Port(in.readString(128), in.readString(256), in.readBoolean())),
-                buffer.readBoolean() ? new mekanism.cloudworks.common.data.CloudworksThermalState(
-                        buffer.readDouble(), buffer.readDouble(), buffer.readDouble(), buffer.readDouble(),
-                        buffer.readDouble(), buffer.readDouble(), buffer.readDouble(), buffer.readDouble(), buffer.readBoolean()) : null));
+        List<Node> nodes = readList(b, b.readableBytes() / 32, CloudworksGuiCodec::readNode);
         List<Link> links = readList(b, b.readableBytes() / 64, buffer -> new Link(uuid(buffer), uuid(buffer),
                 buffer.readString(128), uuid(buffer), buffer.readString(128), buffer.readBoolean(),
                 buffer.readInt(), ratio(buffer.readDouble()), readList(buffer, MAX_ENTRIES, in -> in.readString(512))));
         Graph graph = new Graph(id, name, enabled, routing, energy, maximum, speed, upgrades, nodes, links);
         graph.configuration = configuration;
+        graph.customUpgrades = readList(b, b.readableBytes() / 12,
+                CloudworksGuiCodec::readCustomUpgrade);
         return graph;
+    }
+
+    /** Common node projection first, then the Kind-specific identity and tail fields. */
+    private static void writeNode(PacketBuffer buffer, Node node) {
+        buffer.writeByte(node.kind().ordinal());
+        uuid(buffer, node.id);
+        buffer.writeString(node.state);
+        buffer.writeInt(node.x);
+        buffer.writeInt(node.z);
+        buffer.writeBoolean(node.active);
+        writeSummaries(buffer, node.input);
+        writeSummaries(buffer, node.output);
+        writeSummaries(buffer, node.templates);
+        writeList(buffer, node.ports, (out, port) -> {
+            out.writeString(port.id);
+            out.writeString(port.codec);
+            out.writeBoolean(port.output);
+        });
+        buffer.writeBoolean(node.thermal != null);
+        if (node.thermal != null) {
+            buffer.writeDouble(node.thermal.heat); buffer.writeDouble(node.thermal.capacity);
+            buffer.writeDouble(node.thermal.plasma); buffer.writeDouble(node.thermal.fuelTicks);
+            buffer.writeDouble(node.thermal.credit); buffer.writeDouble(node.thermal.produced);
+            buffer.writeDouble(node.thermal.consumed); buffer.writeDouble(node.thermal.loss);
+            buffer.writeBoolean(node.thermal.burning);
+        }
+        writeList(buffer, node.branches, (out, branch) -> {
+            out.writeString(branch.id); out.writeString(branch.state);
+            out.writeInt(branch.progress); out.writeInt(branch.duration);
+        });
+        if (node instanceof MachineNode) {
+            MachineNode machine = (MachineNode) node;
+            buffer.writeString(machine.machineIdentity);
+            buffer.writeInt(machine.count);
+            buffer.writeInt(machine.progress);
+            buffer.writeInt(machine.duration);
+        } else if (node instanceof AuxiliaryNode) {
+            buffer.writeString(((AuxiliaryNode) node).auxiliaryItem);
+        } else {
+            ChannelNode channel = (ChannelNode) node;
+            buffer.writeString(channel.archetypeId);
+            buffer.writeInt(channel.areaHits);
+        }
+    }
+
+    private static Node readNode(PacketBuffer buffer) {
+        Node.Kind kind = Node.Kind.values()[buffer.readByte()];
+        UUID id = uuid(buffer);
+        String state = buffer.readString(128);
+        int x = buffer.readInt(), z = buffer.readInt();
+        boolean active = buffer.readBoolean();
+        List<ResourceSummary> input = readSummaries(buffer), output = readSummaries(buffer),
+                templates = readSummaries(buffer);
+        List<Port> ports = readList(buffer, buffer.readableBytes() / 3,
+                in -> new Port(in.readString(128), in.readString(256), in.readBoolean()));
+        CloudworksThermalState thermal = buffer.readBoolean() ? new CloudworksThermalState(
+                buffer.readDouble(), buffer.readDouble(), buffer.readDouble(), buffer.readDouble(),
+                buffer.readDouble(), buffer.readDouble(), buffer.readDouble(), buffer.readDouble(),
+                buffer.readBoolean()) : null;
+        List<ExecutionBranch> branches = readList(buffer, buffer.readableBytes() / 8, in ->
+                new ExecutionBranch(in.readString(128), in.readString(128), in.readInt(), in.readInt()));
+        String identity = buffer.readString(128);
+        switch (kind) {
+            case MACHINE: return new MachineNode(id, state, identity, x, z,
+                    nonnegative(buffer.readInt()), nonnegative(buffer.readInt()),
+                    nonnegative(buffer.readInt()), active,
+                    input, output, templates, ports, thermal, branches);
+            case AUXILIARY: return new AuxiliaryNode(id, state, identity, x, z, active, input, ports);
+            default: return new ChannelNode(id, state, identity, x, z, active,
+                    input, nonnegative(buffer.readInt()));
+        }
+    }
+
+    private static void writeCustomUpgrade(PacketBuffer buffer, CustomUpgrade entry) {
+        buffer.writeString(entry.id);
+        buffer.writeLong(entry.count);
+    }
+
+    private static CustomUpgrade readCustomUpgrade(PacketBuffer buffer) {
+        String id = buffer.readString(128);
+        new ResourceLocation(id);
+        return new CustomUpgrade(id, nonnegative(buffer.readLong()));
     }
 
     public static void writeMachine(PacketBuffer b, Machine machine) {
@@ -260,6 +399,7 @@ public final class CloudworksGuiCodec {
         b.writeLong(machine.count);
         b.writeLong(machine.claimed);
         b.writeLong(machine.available);
+        b.writeString(machine.categoryId);
         writeList(b, machine.claims, (buffer, claim) -> {
             uuid(buffer, claim.line);
             buffer.writeString(claim.name);
@@ -268,9 +408,13 @@ public final class CloudworksGuiCodec {
     }
 
     public static Machine readMachine(PacketBuffer b) {
-        return new Machine(readStack(b), nonnegative(b.readLong()), nonnegative(b.readLong()),
-                nonnegative(b.readLong()), readList(b, MAX_ENTRIES,
-                        buffer -> new Claim(uuid(buffer), buffer.readString(64), nonnegative(buffer.readLong()))));
+        ItemStack stack = readStack(b);
+        long count = nonnegative(b.readLong()), claimed = nonnegative(b.readLong()),
+                available = nonnegative(b.readLong());
+        String categoryId = b.readString(128);
+        return new Machine(stack, count, claimed, available, readList(b, MAX_ENTRIES,
+                buffer -> new Claim(uuid(buffer), buffer.readString(64), nonnegative(buffer.readLong()))),
+                categoryId);
     }
 
     private static void writeSummaries(PacketBuffer b, List<ResourceSummary> summaries) {
@@ -307,6 +451,7 @@ public final class CloudworksGuiCodec {
         for (int index = 0; index < size; index++) result.add(reader.apply(b));
         return result;
     }
+
 
     public static void writeStack(ByteBuf b, ItemStack stack) {
         // Full item templates preserve NBT variants and ForgeCaps, not cloud business state.

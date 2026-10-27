@@ -35,6 +35,8 @@ import net.minecraft.world.IBlockAccess;
 import net.minecraft.world.World;
 
 import javax.annotation.Nonnull;
+import mekanism.cloudworks.common.tile.prefab.TileEntityCloudworksPort;
+import mekanism.cloudworks.common.tile.TileEntityCloudworksTeamRecovery;
 
 /**
  * Mekanism-style shared base for Cloudworks input/output blocks.
@@ -109,7 +111,7 @@ public abstract class BlockCloudworksPort extends BlockMekanismContainer {
     @Deprecated
     public float getPlayerRelativeBlockHardness(IBlockState state, @Nonnull EntityPlayer player,
                                                 @Nonnull World world, @Nonnull BlockPos pos) {
-        return SecurityUtils.canAccess(player, world.getTileEntity(pos))
+        return canAccess(player, world.getTileEntity(pos))
                 ? super.getPlayerRelativeBlockHardness(state, player, world, pos) : 0.0F;
     }
 
@@ -125,7 +127,7 @@ public abstract class BlockCloudworksPort extends BlockMekanismContainer {
             if (wrench != null) {
                 RayTraceResult trace = new RayTraceResult(new Vec3d(hitX, hitY, hitZ), side, pos);
                 if (wrench.canUseWrench(player, hand, held, trace)) {
-                    if (!SecurityUtils.canAccess(player, tile)) {
+                    if (!canAccess(player, tile)) {
                         SecurityUtils.displayNoAccess(player);
                         return true;
                     }
@@ -142,7 +144,7 @@ public abstract class BlockCloudworksPort extends BlockMekanismContainer {
             }
         }
         if (player.isSneaking()) return false;
-        if (!SecurityUtils.canAccess(player, tile)) {
+        if (!canAccess(player, tile)) {
             SecurityUtils.displayNoAccess(player);
             return true;
         }
@@ -151,6 +153,15 @@ public abstract class BlockCloudworksPort extends BlockMekanismContainer {
     }
 
     protected abstract int getGuiID();
+
+    protected boolean canAccess(EntityPlayer player, TileEntity tile) {
+        if (tile instanceof TileEntityCloudworksTeamRecovery recovery)
+            return recovery.canPlayerAccess(player);
+        if (tile instanceof TileEntityCloudworksPort port
+                && port.isTeamPort())
+            return port.canPlayerAccess(player);
+        return SecurityUtils.canAccess(player, tile);
+    }
 
     @Override
     public void harvestBlock(@Nonnull World world, EntityPlayer player, @Nonnull BlockPos pos,
@@ -173,7 +184,7 @@ public abstract class BlockCloudworksPort extends BlockMekanismContainer {
     }
 
     private static void prepareRemoval(World world, BlockPos pos) {
-        if (!world.isRemote && world.getTileEntity(pos) instanceof mekanism.cloudworks.common.tile.prefab.TileEntityCloudworksPort port)
+        if (!world.isRemote && world.getTileEntity(pos) instanceof TileEntityCloudworksPort port)
             port.prepareRemoval();
     }
 

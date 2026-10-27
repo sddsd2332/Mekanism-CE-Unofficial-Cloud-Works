@@ -4,22 +4,31 @@ import java.util.*;
 import mekanism.cloudworks.common.blueprint.CloudworksBlueprint;
 import mekanism.cloudworks.common.network.data.CloudworksLineDraft;
 import mekanism.cloudworks.common.registry.CloudworksRegistries;
+import mekanism.cloudworks.api.CloudworksAreaGeometry;
+import mekanism.api.qio.resource.QIOResourceCodecRegistry;
+import mekanism.cloudworks.api.machine.MachineSlotLayout;
+import mekanism.cloudworks.common.network.CloudworksLineDraftCodec;
+import mekanism.cloudworks.common.registry.CloudworksNodeMechanisms;
 
 /** Identical geometry rules on both sides of the editor protocol. */
 public final class CloudworksDraftGeometry {
-    public static final int WIDTH = 132, GRID = 24;
+    public static final int WIDTH = CloudworksAreaGeometry.NODE_WIDTH,
+            GRID = CloudworksAreaGeometry.GRID;
+    public static final int ENVIRONMENT_SOURCE_HEIGHT = CloudworksAreaGeometry.nodeHeight(0);
     private CloudworksDraftGeometry() {}
 
     public static int height(CloudworksLineDraft.Machine machine) {
-        mekanism.cloudworks.common.slot.MachineSlotLayout slots = CloudworksRegistries.slots(machine.type);
-        return 57 + Math.max(1, slots == null ? 0 : slots.slots().size()) * 12;
+        MachineSlotLayout slots =
+                CloudworksNodeMechanisms.slots(machine);
+        return CloudworksAreaGeometry.nodeHeight(slots == null ? 0 : slots.slots().size());
     }
     public static int channelHeight(CloudworksLineDraft.Channel channel) {
+        if (CloudworksNodeEnvironment.source(channel.archetypeId)) return ENVIRONMENT_SOURCE_HEIGHT;
         Set<String> codecs = new HashSet<>();
-        mekanism.api.qio.resource.QIOResourceCodecRegistry.INSTANCE.getCodecs().keySet()
+        QIOResourceCodecRegistry.INSTANCE.getCodecs().keySet()
                 .forEach(codec -> codecs.add(codec.toString()));
         channel.resources.forEach(resource -> codecs.add(resource.descriptor.getCodecId().toString()));
-        return 57 + Math.max(1, codecs.size()) * 12;
+        return CloudworksAreaGeometry.nodeHeight(codecs.size());
     }
     public static int snap(double position) { return (int) Math.round(position / GRID) * GRID; }
     public static boolean canMove(CloudworksLineDraft draft, Set<UUID> ids, int dx, int dy) {
@@ -32,6 +41,11 @@ public final class CloudworksDraftGeometry {
         for (CloudworksLineDraft.Channel channel : draft.channels) {
             Rect rect = new Rect(channel.id, channel.x, channel.y, channelHeight(channel));
             (ids.contains(channel.id) ? selected : rest).add(rect); present.add(channel.id);
+        }
+        for (CloudworksLineDraft.Auxiliary auxiliary : draft.auxiliaries) {
+            Rect rect = new Rect(auxiliary.id, auxiliary.x, auxiliary.y,
+                    Math.max(ENVIRONMENT_SOURCE_HEIGHT, CloudworksAreaGeometry.nodeHeight(1)));
+            (ids.contains(auxiliary.id) ? selected : rest).add(rect); present.add(auxiliary.id);
         }
         if (ids.isEmpty() || !present.containsAll(ids)) return false;
         for (Rect moved : selected) {
@@ -51,16 +65,21 @@ public final class CloudworksDraftGeometry {
         for (CloudworksLineDraft.Channel channel : draft.channels) if (ids.contains(channel.id)) {
             channel.x += dx; channel.y += dy;
         }
+        for (CloudworksLineDraft.Auxiliary auxiliary : draft.auxiliaries) if (ids.contains(auxiliary.id)) {
+            auxiliary.x += dx; auxiliary.y += dy;
+        }
     }
     public static void remove(CloudworksLineDraft draft, Set<UUID> ids) {
         draft.machines.removeIf(machine -> ids.contains(machine.id));
         draft.channels.removeIf(channel -> ids.contains(channel.id));
+        draft.auxiliaries.removeIf(auxiliary -> ids.contains(auxiliary.id));
         draft.links.removeIf(wire -> ids.contains(wire.source) || ids.contains(wire.target));
     }
     public static CloudworksLineDraft selection(CloudworksLineDraft draft, Set<UUID> ids) {
-        CloudworksLineDraft result = mekanism.cloudworks.common.network.CloudworksLineDraftCodec.copy(draft);
+        CloudworksLineDraft result = CloudworksLineDraftCodec.copy(draft);
         result.machines.removeIf(machine -> !ids.contains(machine.id));
         result.channels.removeIf(channel -> !ids.contains(channel.id));
+        result.auxiliaries.removeIf(auxiliary -> !ids.contains(auxiliary.id));
         result.links.removeIf(wire -> !ids.contains(wire.source) || !ids.contains(wire.target));
         return result;
     }

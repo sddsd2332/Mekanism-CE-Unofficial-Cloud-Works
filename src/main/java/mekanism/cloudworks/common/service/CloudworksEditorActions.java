@@ -11,6 +11,12 @@ import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.item.ItemStack;
 
 import java.util.UUID;
+import java.util.Collections;
+import java.util.Locale;
+import mekanism.cloudworks.api.transfer.CloudworksUploadResult;
+import mekanism.cloudworks.api.transfer.ICloudworksUploadSource;
+import mekanism.cloudworks.common.registries.CloudworksItems;
+import mekanism.cloudworks.common.registry.CloudworksRegistries;
 
 public final class CloudworksEditorActions {
     private CloudworksEditorActions() {
@@ -33,6 +39,16 @@ public final class CloudworksEditorActions {
             manager.returnCache(owner, lineId, nodeId);
             return true;
         }
+        if (operation == Operation.LINE_BUFFER_CAPACITY) {
+            ItemStack held = player.getHeldItemMainhand();
+            if (held.isEmpty() || held.getItem() != CloudworksItems.LineCapacityCard)
+                throw new IllegalArgumentException("cloudworks.error.line_capacity_card");
+            int result = manager.increaseLineBufferMultiplier(owner, lineId);
+            if (result == -1) throw new IllegalArgumentException("cloudworks.error.not_found");
+            if (result == -2) throw new IllegalArgumentException("cloudworks.error.line_capacity_max");
+            held.shrink(1);
+            return true;
+        }
         if (operation == Operation.CLEAR_NODE_CACHE) {
             manager.clearNodeCache(owner, lineId, nodeId);
             return true;
@@ -43,18 +59,18 @@ public final class CloudworksEditorActions {
             if (slot < 0 || slot >= 36 || parts.length != 3) throw error();
             ItemStack stack = player.inventory.getStackInSlot(slot);
             if (stack.isEmpty()) throw error();
-            if (!mekanism.cloudworks.common.registry.CloudworksRegistries.isRegistered(stack))
+            if (!CloudworksRegistries.isRegistered(stack))
                 throw new IllegalArgumentException("cloudworks.error.machine_unregistered");
-            mekanism.cloudworks.api.ICloudworksUploadSource source =
+            ICloudworksUploadSource source =
                     new CloudworksPlayerInventorySource(player.inventory.mainInventory,
                     player.getUniqueID(), owner, () -> {
                 player.inventory.markDirty();
                 player.inventoryContainer.detectAndSendChanges();
             });
-            mekanism.cloudworks.api.CloudworksUploadResult uploaded = manager.uploadMachines(
-                    source, lineId, stack, stack.getCount(), coordinate(parts[1]), coordinate(parts[2]), player.dimension);
+            CloudworksUploadResult uploaded = manager.uploadMachines(
+                    source, lineId, stack, stack.getCount(), coordinate(parts[1]), coordinate(parts[2]));
             if (!uploaded.success())
-                throw new IllegalArgumentException("cloudworks.error." + uploaded.refusal().name().toLowerCase(java.util.Locale.ROOT));
+                throw new IllegalArgumentException("cloudworks.error." + uploaded.refusal().name().toLowerCase(Locale.ROOT));
             return true;
         }
         if (operation == Operation.MERGE_MACHINE) {
@@ -62,16 +78,16 @@ public final class CloudworksEditorActions {
             if (slot < 0 || slot >= 36) throw error();
             ItemStack stack = player.inventory.getStackInSlot(slot);
             if (stack.isEmpty()) throw error();
-            mekanism.cloudworks.api.ICloudworksUploadSource source =
+            ICloudworksUploadSource source =
                     new CloudworksPlayerInventorySource(player.inventory.mainInventory,
                     player.getUniqueID(), owner, () -> {
                 player.inventory.markDirty();
                 player.inventoryContainer.detectAndSendChanges();
             });
-            mekanism.cloudworks.api.CloudworksUploadResult merged = manager.mergeMachines(
+            CloudworksUploadResult merged = manager.mergeMachines(
                     source, lineId, nodeId, stack, stack.getCount());
             if (!merged.success())
-                throw new IllegalArgumentException("cloudworks.error." + merged.refusal().name().toLowerCase(java.util.Locale.ROOT));
+                throw new IllegalArgumentException("cloudworks.error." + merged.refusal().name().toLowerCase(Locale.ROOT));
             return true;
         }
         if (operation == Operation.INSTALL_UPGRADE || operation == Operation.REMOVE_SPEED || operation == Operation.REMOVE_ENERGY) {
@@ -80,6 +96,8 @@ public final class CloudworksEditorActions {
             // item is deliberately not consulted or consumed here; terminal
             // input has already deposited physical upgrade items into the
             // cache. The client sends the selected cache type explicitly.
+            // Custom types are node-only and travel through the edit draft.
+            if (value != null && value.indexOf(':') >= 0) throw error();
             boolean speed;
             if (install) {
                 if ("speed".equalsIgnoreCase(value)) speed = true;
@@ -110,7 +128,7 @@ public final class CloudworksEditorActions {
                     ProductionLineLink selected = null;
                     for (ProductionLineLink link : line.links()) if (link.linkId().equals(nodeId)) selected = link;
                     if (selected == null) throw error();
-                    if (operation == Operation.FILTER_LINK_CLEAR) selected.setResourceFilters(java.util.Collections.emptyList());
+                    if (operation == Operation.FILTER_LINK_CLEAR) selected.setResourceFilters(Collections.emptyList());
                     else if (operation == Operation.FILTER_LINK_CHOICE)
                         selected.addResourceFilter(container.resourceChoice(lineId, nodeId, Integer.parseInt(value)));
                     else {

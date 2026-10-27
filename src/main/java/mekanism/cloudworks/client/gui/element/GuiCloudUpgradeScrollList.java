@@ -1,68 +1,82 @@
 package mekanism.cloudworks.client.gui.element;
 
-import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
+import javax.annotation.Nullable;
 import mekanism.api.EnumColor;
 import mekanism.client.gui.IGuiWrapper;
 import mekanism.client.gui.element.GuiElementHolder;
 import mekanism.client.gui.element.scroll.GuiInstallableScrollList;
 import mekanism.client.render.MekanismRenderer;
-import mekanism.common.Upgrade;
 import mekanism.common.util.MekanismUtils;
-import mekanism.common.util.UpgradeUtils;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.text.TextComponentString;
 
-import javax.annotation.Nullable;
 import java.util.function.ToIntFunction;
 
 /**
- * Installed-upgrade-list presentation backed by the cloud upgrade pool.
+ * Installed-upgrade-list presentation over mixed entries: the two native
+ * Mekanism slots plus server-projected custom types (8.5-B5). Selection is
+ * rebound to the current entry instance for Mek's reference-based row rendering.
  */
-public final class GuiCloudUpgradeScrollList extends GuiInstallableScrollList<Upgrade> {
+public final class GuiCloudUpgradeScrollList extends GuiInstallableScrollList<CloudUpgradeEntry> {
 
     private static final ResourceLocation UPGRADE_SELECTION = MekanismUtils.getResource(
             MekanismUtils.ResourceType.GUI, "upgrade_selection.png");
     private static final int TEXTURE_WIDTH = 100;
     private static final int TEXTURE_HEIGHT = 36;
 
-    private final ToIntFunction<Upgrade> poolCount;
-    private final Consumer<Upgrade> selectionChanged;
+    private final ToIntFunction<CloudUpgradeEntry> poolCount;
+    private final Consumer<CloudUpgradeEntry> selectionChanged;
+    private final Supplier<List<CloudUpgradeEntry>> entries;
 
     public GuiCloudUpgradeScrollList(IGuiWrapper gui, int x, int y, int height,
-            ToIntFunction<Upgrade> poolCount, Consumer<Upgrade> selectionChanged) {
+            Supplier<List<CloudUpgradeEntry>> entries,
+            ToIntFunction<CloudUpgradeEntry> poolCount, Consumer<CloudUpgradeEntry> selectionChanged) {
         super(gui, x, y, height, GuiElementHolder.HOLDER, GuiElementHolder.HOLDER_SIZE,
                 UPGRADE_SELECTION, TEXTURE_WIDTH, TEXTURE_HEIGHT);
+        this.entries = entries;
         this.poolCount = poolCount;
         this.selectionChanged = selectionChanged;
     }
 
     @Override
-    protected List<Upgrade> getCurrentInstalled() {
-        return Arrays.asList(Upgrade.SPEED, Upgrade.ENERGY);
+    protected List<CloudUpgradeEntry> getCurrentInstalled() {
+        List<CloudUpgradeEntry> installed = entries.get();
+        if (selectedType != null) {
+            int index = installed.indexOf(selectedType);
+            setSelected(index < 0 ? null : installed.get(index));
+        }
+        return installed;
     }
 
     @Override
-    protected void drawName(Upgrade upgrade, int y) {
-        String label = upgrade.getName() + " ×" + poolCount.applyAsInt(upgrade);
-        drawNameText(y, new TextComponentString(label), titleTextColor(), 1F);
+    public void tick() {
+        super.tick();
+        getCurrentInstalled();
     }
 
     @Override
-    protected ItemStack getRenderStack(Upgrade upgrade) {
-        return UpgradeUtils.getStack(upgrade);
+    protected void drawName(CloudUpgradeEntry entry, int y) {
+        drawNameText(y, new TextComponentString(entry.name + " ×" + poolCount.applyAsInt(entry)), titleTextColor(), 1F);
+    }
+
+    @Override
+    protected ItemStack getRenderStack(CloudUpgradeEntry entry) {
+        return entry.stack;
     }
 
     @Nullable
     @Override
-    protected EnumColor getColor(Upgrade upgrade) {
-        return upgrade.getColor();
+    protected EnumColor getColor(CloudUpgradeEntry entry) {
+        return entry.color;
     }
 
     @Override
-    protected void setSelected(@Nullable Upgrade newSelection) {
+    protected void setSelected(@Nullable CloudUpgradeEntry newSelection) {
         if (selectedType != newSelection) {
             selectedType = newSelection;
             selectionChanged.accept(newSelection);
@@ -75,15 +89,16 @@ public final class GuiCloudUpgradeScrollList extends GuiInstallableScrollList<Up
         if (mouseX < getX() + 1 || mouseX >= getX() + barXShift - 1) {
             return;
         }
-        List<Upgrade> upgrades = getCurrentInstalled();
+        List<CloudUpgradeEntry> current = getCurrentInstalled();
         int index = getCurrentSelection() + (int) ((mouseY - getY() - 1) / elementHeight);
-        if (mouseY < getY() + 1 || index < 0 || index >= upgrades.size()) {
+        if (mouseY < getY() + 1 || index < 0 || index >= current.size()) {
             return;
         }
-        Upgrade upgrade = upgrades.get(index);
-        displayTooltips(Arrays.asList(
-                upgrade.getName() + " ×" + poolCount.applyAsInt(upgrade),
-                upgrade.getDescription()), mouseX, mouseY, getGuiWidth());
+        CloudUpgradeEntry entry = current.get(index);
+        List<String> lines = new ArrayList<>(1 + entry.description.size());
+        lines.add(entry.name + " ×" + poolCount.applyAsInt(entry));
+        lines.addAll(entry.description);
+        displayTooltips(lines, mouseX, mouseY, getGuiWidth());
     }
 
     @Override

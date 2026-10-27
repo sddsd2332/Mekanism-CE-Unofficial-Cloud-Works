@@ -7,6 +7,7 @@ import net.minecraftforge.common.util.Constants.NBT;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import mekanism.cloudworks.common.config.CloudworksConfig;
 
 /**
  * Owner-level recycle bin: the receiver for resources held by deleted nodes
@@ -70,7 +71,7 @@ public final class CloudworksRecycleBin {
             throw new IllegalArgumentException("Invalid recycle deposit");
         long current = entries.getOrDefault(descriptor, 0L);
         if (current == 0L && entries.size() >= MAX_TYPES) return amount;
-        long capacity = mekanism.cloudworks.common.config.CloudworksConfig.settings().recycleCapacityPerType;
+        long capacity = CloudworksConfig.settings().recycleCapacityPerType;
         long accepted = Math.min(amount, Math.max(0L, capacity - current));
         long discarded = amount - accepted;
         if (accepted > 0) entries.put(descriptor, current + accepted);

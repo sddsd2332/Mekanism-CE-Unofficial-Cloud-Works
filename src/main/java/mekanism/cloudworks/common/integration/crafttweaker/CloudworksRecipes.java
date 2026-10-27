@@ -3,8 +3,8 @@ package mekanism.cloudworks.common.integration.crafttweaker;
 import crafttweaker.annotations.ZenRegister;
 import crafttweaker.api.item.IItemStack;
 import mekanism.cloudworks.common.integration.CloudworksScriptMachines;
-import mekanism.cloudworks.common.recipe.CloudworksContractRecipeAdapter;
-import mekanism.cloudworks.common.recipe.CloudworksRecipeBatch;
+import mekanism.cloudworks.api.recipe.CloudworksRecipeSpec;
+import mekanism.cloudworks.api.recipe.CloudworksResourceMatcher;
 import net.minecraft.item.ItemStack;
 import stanhebben.zenscript.annotations.ZenClass;
 import stanhebben.zenscript.annotations.ZenMethod;
@@ -14,13 +14,14 @@ import stanhebben.zenscript.annotations.ZenMethod;
 public final class CloudworksRecipes {
     private final String id;
     private final int ticks;
-    private final CloudworksRecipeBatch batch = new CloudworksRecipeBatch();
+    private final CloudworksRecipeSpec.Builder recipe;
     private boolean submitted;
 
     private CloudworksRecipes(String id, int ticks) {
         if (id == null || id.trim().isEmpty() || ticks < 1) throw new IllegalArgumentException("Invalid recipe id or duration");
         this.id = id;
         this.ticks = ticks;
+        this.recipe = CloudworksRecipeSpec.builder(id).duration(ticks);
     }
 
     @ZenMethod
@@ -36,7 +37,7 @@ public final class CloudworksRecipes {
     @ZenMethod
     public CloudworksRecipes input(CloudworksResources resource, String port) {
         mutable();
-        batch.resources(resource.alternatives, resource.amount, port);
+        recipe.matcher(CloudworksResourceMatcher.alternatives(resource.alternatives), resource.amount, port);
         return this;
     }
 
@@ -46,46 +47,81 @@ public final class CloudworksRecipes {
     @ZenMethod
     public CloudworksRecipes output(CloudworksResources resource, String port) {
         mutable();
-        batch.output(resource.single(), resource.amount, port);
+        recipe.output(resource.single(), resource.amount, port);
+        return this;
+    }
+
+    @ZenMethod
+    public CloudworksRecipes unscaledOutput(CloudworksResources resource) { return unscaledOutput(resource, ""); }
+
+    @ZenMethod
+    public CloudworksRecipes unscaledOutput(CloudworksResources resource, String port) {
+        mutable();
+        recipe.unscaledOutput(resource.single(), resource.amount, port);
+        return this;
+    }
+
+    @ZenMethod
+    public CloudworksRecipes unscaledOutputs() {
+        mutable();
+        recipe.unscaledOutputs();
         return this;
     }
 
     @ZenMethod
     public CloudworksRecipes chanceOutput(CloudworksResources resource, double chance) {
         mutable();
-        batch.chanceOutput(resource.single(), resource.amount, chance);
+        recipe.chanceOutput(resource.single(), resource.amount, chance, "");
         return this;
     }
 
     @ZenMethod
     public CloudworksRecipes template(CloudworksResources resource, String port) {
         mutable();
-        batch.template(resource.single(), port);
+        recipe.configuration(resource.single(), port);
         return this;
     }
 
     @ZenMethod
     public CloudworksRecipes energy(double additionalEnergyPerTick) {
         mutable();
-        batch.extraEnergy(additionalEnergyPerTick);
+        recipe.extraEnergyPerTick(additionalEnergyPerTick);
         return this;
     }
 
     @ZenMethod
     public CloudworksRecipes sunlight() {
         mutable();
-        batch.requireSunlight();
+        recipe.requireSunlight();
         return this;
+    }
+
+    @ZenMethod
+    public CloudworksRecipes operationsPerCycle(int count) { mutable(); recipe.operationsPerCycle(count); return this; }
+
+    @ZenMethod
+    public CloudworksRecipes powerDriven(double joulesPerInput, int inputsPerOutput) {
+        mutable(); recipe.powerDriven(joulesPerInput, inputsPerOutput); return this;
+    }
+
+    @ZenMethod
+    public CloudworksRecipes prepaidFuel(CloudworksResources canonicalFuel, int units, double joulesPerUnit) {
+        mutable(); recipe.prepaidFuel(canonicalFuel.single(), units).energyPerOperation(joulesPerUnit); return this;
+    }
+
+    @ZenMethod
+    public CloudworksRecipes secondaryFuelInputs(boolean gas, boolean fluid) {
+        mutable(); if (gas) recipe.secondaryGasInputs(); if (fluid) recipe.secondaryFluidInputs(); return this;
     }
 
     @ZenMethod
     public void register(IItemStack item) {
         mutable();
         ItemStack machine = CloudworksMachines.stack(item);
-        CloudworksContractRecipeAdapter.Contract recipe = new CloudworksContractRecipeAdapter.Contract(id, batch, ticks);
+        CloudworksRecipeSpec declaration = recipe.build();
         submitted = true;
         CloudworksScriptAction.submit("Cloudworks recipe " + id + " on " + machine,
-                () -> CloudworksScriptMachines.recipe(machine, recipe));
+                () -> CloudworksScriptMachines.recipe(machine, declaration));
     }
 
     @ZenMethod

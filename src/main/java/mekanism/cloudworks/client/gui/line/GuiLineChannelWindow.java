@@ -37,7 +37,7 @@ public final class GuiLineChannelWindow extends GuiLineWindow {
         amount = new GuiTextField(gui, relativeX + 8, relativeY + 140, 118, 18).setMaxLength(19);
         amount.setText("1");
         addChild(new GuiLineResourceGrid(gui, relativeX + 8, relativeY + 23, 9, 5,
-                () -> marked, this::select, this::remove, this::mark));
+                () -> marked, () -> selected, this::select, this::remove, this::mark));
         addChild(new MekanismButton(gui, relativeX + 8, relativeY + 117, 90, 18,
                 new TextComponentString(tr("select_resources")), this::openPicker, null));
         remove = addChild(new MekanismButton(gui, relativeX + 104, relativeY + 117, 90, 18,
@@ -68,6 +68,8 @@ public final class GuiLineChannelWindow extends GuiLineWindow {
 
     private void mark(QIOResourceDescriptor descriptor) {
         if (descriptor == null || !descriptor.isResolved()) return;
+        boolean special = !channel.archetypeId.isEmpty();
+        if (special && !model.canSelectInfiniteResource(channel.id, descriptor)) return;
         for (CloudworksLineDraft.Resource resource : channel.resources) {
             if (resource.descriptor.equals(descriptor)) {
                 select(descriptor);
@@ -109,10 +111,13 @@ public final class GuiLineChannelWindow extends GuiLineWindow {
         for (CloudworksLineDraft.Channel node : draft.channels)
             for (CloudworksLineDraft.Resource resource : node.resources) extra.add(resource.descriptor);
         for (CloudworksLineDraft.Wire link : draft.links) extra.addAll(link.filters);
-        picker = new GuiLineResourcePickerWindow(gui(), extra, this::mark);
+        picker = channel.archetypeId.isEmpty()
+                ? new GuiLineResourcePickerWindow(gui(), extra, this::mark)
+                : new GuiLineResourcePickerWindow(gui(), model.infiniteResources(), this::mark,
+                descriptor -> model.canSelectInfiniteResource(channel.id, descriptor));
         picker.setTabListeners(window -> picker = null, null);
         gui().addWindow(picker);
-        query(0);
+        if (channel.archetypeId.isEmpty()) query(0);
     }
 
     private void query(int offset) {
@@ -132,7 +137,9 @@ public final class GuiLineChannelWindow extends GuiLineWindow {
                 if (choices.offset + choices.resources.size() < choices.total) query(choices.offset + choices.resources.size());
             }
         }
-        apply.active = remove.active = selected != null;
+        remove.active = selected != null;
+        apply.active = selected != null && channel.archetypeId.isEmpty();
+        amount.visible = apply.visible = channel.archetypeId.isEmpty();
     }
 
     @Override

@@ -10,6 +10,9 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.HashSet;
+import java.util.Set;
+import mekanism.common.Mekanism;
 
 /**
  * Bounded per-owner executor for structural edit commands (Runtime
@@ -30,7 +33,7 @@ public final class CloudworksCommandService implements AutoCloseable {
     private final ThreadPoolExecutor workers;
     private final Object queueLock = new Object();
     private final Map<UUID, ArrayDeque<Runnable>> ownerQueues = new HashMap<>();
-    private final java.util.Set<UUID> scheduledOwners = new java.util.HashSet<>();
+    private final Set<UUID> scheduledOwners = new HashSet<>();
     private final AtomicInteger queuedCommands = new AtomicInteger();
     private final AtomicLong submitted = new AtomicLong();
     private final AtomicLong applied = new AtomicLong();
@@ -106,9 +109,9 @@ public final class CloudworksCommandService implements AutoCloseable {
             try {
                 command.run();
             } catch (RuntimeException failure) {
-                System.err.println("Cloudworks command failed: " + failure);
+                Mekanism.logger.error("Cloudworks command failed for owner {}", owner, failure);
             } catch (Throwable fatal) {
-                System.err.println("Cloudworks command worker failed: " + fatal);
+                Mekanism.logger.error("Cloudworks command worker failed for owner {}", owner, fatal);
                 synchronized (queueLock) {
                     ArrayDeque<Runnable> remaining = ownerQueues.get(owner);
                     if (remaining == null || remaining.isEmpty()) {

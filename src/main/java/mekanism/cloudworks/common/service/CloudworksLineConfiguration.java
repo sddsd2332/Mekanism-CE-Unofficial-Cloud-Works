@@ -8,6 +8,8 @@ import mekanism.cloudworks.common.network.data.CloudworksLineDraft;
 import mekanism.cloudworks.common.registry.CloudworksRegistries;
 import net.minecraft.nbt.JsonToNBT;
 import net.minecraft.nbt.NBTException;
+import mekanism.cloudworks.common.config.CloudworksConfig;
+import net.minecraft.util.ResourceLocation;
 
 /** Projection shared by the observer and the editor snapshot. */
 public final class CloudworksLineConfiguration {
@@ -37,7 +39,8 @@ public final class CloudworksLineConfiguration {
         draft.line = line.lineId();
         draft.name = line.name();
         draft.enabled = line.enabled();
-        draft.maxMachinesPerNode = mekanism.cloudworks.common.config.CloudworksConfig.settings().maxMachinesPerNode;
+        draft.maxMachinesPerNode = CloudworksConfig.settings().maxMachinesPerNode;
+        draft.nodeBufferMultiplier = line.nodeBufferMultiplier();
         draft.runWhileOwnerOffline = line.runWhileOwnerOffline();
         draft.explicitRouting = line.explicitRouting();
         draft.receivingFlow = line.energyFlowReceivingToLine();
@@ -51,18 +54,35 @@ public final class CloudworksLineConfiguration {
             CloudworksLineDraft.Machine machine = new CloudworksLineDraft.Machine(node.nodeId(),
                     CloudworksRegistries.identityKey(node.machine()).displayStack(), node.x(), node.z(), node.machineCount());
             machine.active = node.configuredActive();
-            machine.dimension = node.dimensionId();
+            machine.recipeType = node.recipeType();
+            machine.oreRules.addAll(node.oreRules());
+            machine.fusionInjectionRate = node.fusionInjectionRate();
+            for (ResourceLocation id : node.customUpgrades().ids())
+                machine.assignedCustom(id.toString(), node.customUpgrades().count(id));
             machine.waiting = node.waitingBlueprint();
+            machine.waitingMechanism = node.waitingMechanism();
             machine.required = node.waitingCount();
             machine.missing = machine.required;
             draft.machines.add(machine);
         }
         for (CloudworksChannelNode node : line.channels()) {
-            CloudworksLineDraft.Channel channel = new CloudworksLineDraft.Channel(node.id(), node.mode(), node.x(), node.z());
+            CloudworksLineDraft.Channel channel = new CloudworksLineDraft.Channel(
+                    node.id(), node.mode(), node.archetypeId(), node.x(), node.z());
             channel.active = node.configuredEnabled();
             channel.waiting = node.waitingBlueprint();
+            channel.config = node.config().copy();
             node.resources().forEach((resource, amount) -> channel.resources.add(new CloudworksLineDraft.Resource(resource, amount)));
             draft.channels.add(channel);
+        }
+        for (CloudworksAuxiliaryNodeData node : line.auxiliaries()) {
+            CloudworksLineDraft.Auxiliary auxiliary = new CloudworksLineDraft.Auxiliary(
+                    node.nodeId(), node.type(), node.x(), node.z());
+            auxiliary.active = node.active();
+            auxiliary.range = node.range();
+            auxiliary.targets.addAll(node.linkedTargets());
+            node.input().snapshot().forEach((resource, amount) ->
+                    auxiliary.resources.add(new CloudworksLineDraft.Resource(resource, amount)));
+            draft.auxiliaries.add(auxiliary);
         }
         for (ProductionLineLink link : line.links()) {
             CloudworksLineDraft.Wire wire = new CloudworksLineDraft.Wire(link.linkId(), link.sourceNode(),

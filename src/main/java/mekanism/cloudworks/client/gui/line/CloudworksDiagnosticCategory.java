@@ -11,13 +11,13 @@ public enum CloudworksDiagnosticCategory {
         return switch (state) {
             case "READY", "RUNNING", "GENERATING", "DECAYING", "BUFFERED", "BUFFER_EMPTY" -> NORMAL;
             case "WAITING_INPUT", "WAITING_FUEL", "INSUFFICIENT_INPUT", "MISSING_INPUT",
-                    "NO_MATCHING_FUEL", "INSUFFICIENT_FUEL", "WAITING_TEMPLATE", "WAITING_SUNLIGHT",
+                    "NO_MATCHING_FUEL", "INSUFFICIENT_FUEL", "WAITING_TEMPLATE", "WAITING_ENVIRONMENT", "WAITING_SUNLIGHT",
                     "WAITING_WIND", "WAITING_HEAT" -> INPUT;
             case "WAITING_OUTPUT", "DECAY_BLOCKED", "BUFFER_FULL" -> OUTPUT;
             case "WAITING_POWER" -> POWER;
             case "UNSUPPORTED_RECIPE", "NO_RECIPE", "NO_MATCHING_RECIPE" -> RECIPE;
             case "OFF", "LINE_STOPPED" -> DISABLED;
-            case "WRONG_DIMENSION", "NO_GENERATION", "WAITING_BLUEPRINT" -> OTHER;
+            case "NO_GENERATION", "WAITING_BLUEPRINT" -> OTHER;
             default -> OTHER;
         };
     }

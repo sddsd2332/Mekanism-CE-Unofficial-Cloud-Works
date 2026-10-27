@@ -2,6 +2,7 @@ package mekanism.cloudworks.client.gui.line;
 
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.IntSupplier;
 import mekanism.client.gui.IGuiWrapper;
 import mekanism.client.gui.element.button.MekanismButton;
 import mekanism.common.inventory.container.SelectedWindowData;
@@ -10,17 +11,24 @@ import net.minecraft.util.text.TextComponentString;
 public final class GuiLineStateWindow extends GuiLineWindow {
     private static final SelectedWindowData.WindowType TYPE = type("state");
     private final MekanismButton start, stop, offlineOn, offlineOff;
-    private final BooleanSupplier running, ready, offlineUnlocked, offlineRunning, offlineAllowed;
+    private final BooleanSupplier running, ready, offlineUnlocked, offlineRunning, offlineAllowed, lineCapacityAvailable;
+    private final IntSupplier lineCapacityMultiplier;
+    private final Runnable useLineCapacity;
 
     public GuiLineStateWindow(IGuiWrapper gui, BooleanSupplier running, BooleanSupplier ready,
             Consumer<Boolean> setState, BooleanSupplier offlineUnlocked, BooleanSupplier offlineAllowed, BooleanSupplier offlineRunning,
-            Consumer<Boolean> setOffline) {
-        super(gui, 30, 52, 154, windowHeight(offlineUnlocked.getAsBoolean()), "state_control", TYPE);
+            Consumer<Boolean> setOffline, BooleanSupplier lineCapacityAvailable, IntSupplier lineCapacityMultiplier,
+            Runnable useLineCapacity) {
+        super(gui, 30, 52, 154, windowHeight(offlineUnlocked.getAsBoolean(), lineCapacityAvailable.getAsBoolean()),
+                "state_control", TYPE);
         this.running = running;
         this.ready = ready;
         this.offlineUnlocked = offlineUnlocked;
         this.offlineRunning = offlineRunning;
         this.offlineAllowed = offlineAllowed;
+        this.lineCapacityAvailable = lineCapacityAvailable;
+        this.lineCapacityMultiplier = lineCapacityMultiplier;
+        this.useLineCapacity = useLineCapacity;
         start = addChild(new MekanismButton(gui, relativeX + 8, relativeY + 23, 66, 18,
                 new TextComponentString(tr("start")), () -> setState.accept(true), null));
         stop = addChild(new MekanismButton(gui, relativeX + 80, relativeY + 23, 66, 18,
@@ -29,10 +37,16 @@ public final class GuiLineStateWindow extends GuiLineWindow {
                 new TextComponentString(tr("offline_on")), () -> setOffline.accept(true), null));
         offlineOff = addChild(new MekanismButton(gui, relativeX + 80, relativeY + 44, 66, 18,
                 new TextComponentString(tr("offline_off")), () -> setOffline.accept(false), null));
+        capacity = addChild(new MekanismButton(gui, relativeX + 8, relativeY + 65, 138, 18,
+                new TextComponentString(tr("use_line_capacity_card")), useLineCapacity, null));
         tick();
     }
 
-    public static int windowHeight(boolean unlocked) { return unlocked ? 70 : 49; }
+    private final MekanismButton capacity;
+
+    public static int windowHeight(boolean unlocked, boolean capacity) {
+        return (unlocked ? 70 : 49) + (capacity ? 21 : 0);
+    }
 
     @Override
     public void tick() {
@@ -40,9 +54,14 @@ public final class GuiLineStateWindow extends GuiLineWindow {
         start.active = ready.getAsBoolean() && !running.getAsBoolean();
         stop.active = ready.getAsBoolean() && running.getAsBoolean();
         boolean unlocked = offlineUnlocked.getAsBoolean();
-        height = windowHeight(unlocked);
+        boolean capacityAvailable = lineCapacityAvailable.getAsBoolean();
+        height = windowHeight(unlocked, capacityAvailable);
         offlineOn.visible = offlineOff.visible = unlocked;
         offlineOn.active = unlocked && offlineAllowed.getAsBoolean() && ready.getAsBoolean() && !offlineRunning.getAsBoolean();
         offlineOff.active = unlocked && ready.getAsBoolean() && offlineRunning.getAsBoolean();
+        capacity.visible = capacityAvailable;
+        capacity.active = capacityAvailable && ready.getAsBoolean();
+        if (capacityAvailable)
+            capacity.setMessage(new TextComponentString(tr("use_line_capacity_card") + " x" + lineCapacityMultiplier.getAsInt()));
     }
 }

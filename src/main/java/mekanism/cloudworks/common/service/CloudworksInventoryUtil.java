@@ -28,7 +28,8 @@ public final class CloudworksInventoryUtil {
             }
             for (int i = 0; i < simulated.size() && remaining > 0; i++)
                 if (simulated.get(i).isEmpty()) {
-                    int moved = Math.min(source.getMaxStackSize(), remaining);
+                    int moved = Math.min(Math.min(source.getMaxStackSize(),
+                            inventory.getInventoryStackLimit()), remaining);
                     ItemStack placed = source.copy();
                     placed.setCount(moved);
                     simulated.set(i, placed);

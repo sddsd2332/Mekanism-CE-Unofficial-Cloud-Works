@@ -2,6 +2,7 @@ package mekanism.cloudworks.common.runtime;
 
 import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
 import java.util.Arrays;
+import it.unimi.dsi.fastutil.ints.IntArrayList;
 
 /** Sparse inventory ledger with inventory-local quantities and reservations. */
 public final class CloudworksRuntimeResourceStore {
@@ -22,8 +23,8 @@ public final class CloudworksRuntimeResourceStore {
     private long[] entryVersion = new long[64];
     private int[] entryInventory = new int[64];
     private boolean[] dirty = new boolean[64];
-    private it.unimi.dsi.fastutil.ints.IntArrayList[] changed =
-            new it.unimi.dsi.fastutil.ints.IntArrayList[32];
+    private IntArrayList[] changed =
+            new IntArrayList[32];
     private long[][] groupTotals = new long[32][];
     private int[][][] resourceGroups = new int[32][][];
 
@@ -50,7 +51,7 @@ public final class CloudworksRuntimeResourceStore {
         }
         heads[inventoryCount] = -1;
         totals[inventoryCount] = 0;
-        changed[inventoryCount] = new it.unimi.dsi.fastutil.ints.IntArrayList();
+        changed[inventoryCount] = new IntArrayList();
         inventoryVersions[inventoryCount] = ++version;
         return inventoryCount++;
     }
@@ -154,7 +155,7 @@ public final class CloudworksRuntimeResourceStore {
     public long entryVersion(int entry) { return entryVersion[checkEntry(entry)]; }
 
     public int[] drainChanges(int inventory) {
-        it.unimi.dsi.fastutil.ints.IntArrayList entries = changed[checkInventory(inventory)];
+        IntArrayList entries = changed[checkInventory(inventory)];
         int[] result = entries.toIntArray();
         entries.clear();
         for (int entry : result) dirty[entry] = false;

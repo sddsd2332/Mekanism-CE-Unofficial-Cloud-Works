@@ -6,6 +6,21 @@ import java.util.concurrent.TimeoutException;
 import mekanism.cloudworks.common.service.CloudworksSessionPolicy;
 import mekanism.cloudworks.common.service.CloudworksDetachedState;
 import mekanism.cloudworks.common.service.CloudworksResourceSymbols;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import mekanism.cloudworks.api.environment.CloudworksGenerationContext;
+import mekanism.cloudworks.api.environment.CloudworksGenerationPlan;
+import mekanism.cloudworks.common.data.CloudworksData;
+import mekanism.cloudworks.common.data.ProductionLineData;
+import mekanism.cloudworks.common.service.CloudworksNativeContracts;
+import mekanism.cloudworks.common.service.CloudworksPlayerDataManager;
+import mekanism.cloudworks.common.service.CloudworksRuntimeSettings;
+import mekanism.common.Mekanism;
 
 /**
  * Lifecycle facade for the new player-owned Runtime architecture.
@@ -18,19 +33,27 @@ public final class CloudworksRuntimeService implements AutoCloseable {
     private static final long SHUTDOWN_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(120);
     private final CloudworksRuntimeExecutor executor;
     private final int checkpointIntervalTicks;
-    private final java.util.Map<UUID, Player> players = new java.util.LinkedHashMap<>();
+    private final boolean durableCheckpoints;
+    private final int coldCompilationLimit;
+    private final Map<UUID, Player> players = new LinkedHashMap<>();
     private final Stats counters = new Stats();
     private final CloudworksExternalEventBridge externalBridge = new CloudworksExternalEventBridge();
     private long tick;
     private boolean closed;
 
     public CloudworksRuntimeService(int workers) {
-        this(workers, mekanism.cloudworks.common.service.CloudworksRuntimeSettings.checkpointIntervalTicks());
+        this(workers, CloudworksRuntimeSettings.checkpointIntervalTicks());
     }
 
     public CloudworksRuntimeService(int workers, int checkpointIntervalTicks) {
+        this(workers, checkpointIntervalTicks, CloudworksRuntimeSettings.durableCheckpoints());
+    }
+
+    public CloudworksRuntimeService(int workers, int checkpointIntervalTicks, boolean durableCheckpoints) {
         if (checkpointIntervalTicks < 1) throw new IllegalArgumentException("Invalid checkpoint interval");
         this.checkpointIntervalTicks = checkpointIntervalTicks;
+        this.durableCheckpoints = durableCheckpoints;
+        coldCompilationLimit = Math.max(1, Math.min(2, workers));
         executor = new CloudworksRuntimeExecutor(workers);
     }
 
@@ -54,12 +77,12 @@ public final class CloudworksRuntimeService implements AutoCloseable {
         counters.serverTicks++;
     }
 
-    public void serverTick(mekanism.cloudworks.common.service.CloudworksPlayerDataManager manager,
+    public void serverTick(CloudworksPlayerDataManager manager,
                            CloudworksSessionPolicy sessions) {
         if (closed) return;
-        mekanism.cloudworks.common.service.CloudworksNativeContracts.refresh();
+        CloudworksNativeContracts.refresh();
         for (Player player : players.values()) {
-            java.util.concurrent.FutureTask<Completion> task = player.task;
+            FutureTask<Completion> task = player.task;
             if (task == null || !task.isDone() || executor.scheduled(player.owner)) continue;
             if (manager.persistenceBacklogDepth() >= Math.max(1, manager.persistenceIoCapacity() / 2)) {
                 counters.persistenceWaits++;
@@ -68,13 +91,14 @@ public final class CloudworksRuntimeService implements AutoCloseable {
             try {
                 Completion completion = task.get();
                 CloudworksRuntimeCheckpoint checkpoint = completion.checkpoint;
-                mekanism.cloudworks.common.service.CloudworksPlayerDataManager.CommitStatus status =
+                CloudworksPlayerDataManager.CommitStatus status =
                         checkpoint == null ? manager.runtimeCurrent(player.origin, player.managerRevision)
-                            ? mekanism.cloudworks.common.service.CloudworksPlayerDataManager.CommitStatus.EMPTY
-                            : mekanism.cloudworks.common.service.CloudworksPlayerDataManager.CommitStatus.CONFLICT
+                            ? CloudworksPlayerDataManager.CommitStatus.EMPTY
+                            : CloudworksPlayerDataManager.CommitStatus.CONFLICT
                         : manager.commitRuntimeCheckpoint(player.origin, player.managerRevision, checkpoint,
-                            player.checkpoint == null || checkpointDue(player.owner, tick, checkpointIntervalTicks));
-                if (status != mekanism.cloudworks.common.service.CloudworksPlayerDataManager.CommitStatus.CONFLICT) {
+                            durableCheckpoints && (player.checkpoint == null
+                                    || checkpointDue(player.owner, tick, checkpointIntervalTicks)));
+                if (status != CloudworksPlayerDataManager.CommitStatus.CONFLICT) {
                     player.managerRevision = manager.revision(player.owner);
                     if (checkpoint != null) player.checkpoint = checkpoint;
                     player.stateVersion = completion.stateVersion;
@@ -94,13 +118,14 @@ public final class CloudworksRuntimeService implements AutoCloseable {
                     player.coldData = null;
                     counters.conflicts++;
                 }
-            } catch (java.util.concurrent.ExecutionException failure) {
+            } catch (ExecutionException failure) {
                 player.failure = failure.getCause();
                 player.failures++;
                 player.retryTick = tick + 100;
                 player.origin = null;
                 player.checkpoint = null;
-                System.err.println("Cloudworks Runtime failed owner=" + player.owner + ": " + player.failure);
+                Mekanism.logger.error("Cloudworks Runtime failed for owner {}", player.owner,
+                        player.failure);
                 counters.workerFailures++;
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
@@ -116,26 +141,26 @@ public final class CloudworksRuntimeService implements AutoCloseable {
                 player.task = null;
             }
         }
-        java.util.List<mekanism.cloudworks.common.data.CloudworksData> clouds = manager.cloudSnapshot();
-        clouds.sort(java.util.Comparator.comparingLong(
-                (mekanism.cloudworks.common.data.CloudworksData cloud) -> {
+        List<CloudworksData> clouds = manager.cloudSnapshot();
+        clouds.sort(Comparator.comparingLong(
+                (CloudworksData cloud) -> {
                     Player player = players.get(cloud.owner());
                     return player == null ? 0 : player.lastSubmittedTick;
                 }));
-        for (mekanism.cloudworks.common.data.CloudworksData cloud : clouds) {
+        for (CloudworksData cloud : clouds) {
             UUID owner = cloud.owner();
             Player player = players.get(owner);
             if (!cloud.enabled() || manager.recoveryRequired(owner)) {
                 evictIdleOwner(owner, player, manager, manager.recoveryRequired(owner));
                 continue;
             }
-            java.util.List<UUID> eligible = manager.runtimeLineIds(cloud, sessions);
+            List<UUID> eligible = manager.runtimeLineIds(cloud, sessions);
             if (eligible.isEmpty() && !relayEnergyNeedsRuntime(cloud)) {
                 evictIdleOwner(owner, player, manager, false);
                 continue;
             }
             if (player == null) player = players.computeIfAbsent(owner, Player::new);
-            if (checkpointDue(owner, tick, checkpointIntervalTicks)
+            if (durableCheckpoints && checkpointDue(owner, tick, checkpointIntervalTicks)
                     && manager.persistenceBacklogDepth() < Math.max(1, manager.persistenceIoCapacity() / 2)) {
                 try {
                     manager.flushRuntimePending(owner);
@@ -148,15 +173,23 @@ public final class CloudworksRuntimeService implements AutoCloseable {
             player.clock.record(Math.max(1, manager.simulatedTick()));
             if (player.requestedTick - player.simulatedTick >= 20 && tick - player.warningTick >= 200) {
                 player.warningTick = tick;
-                System.err.println("Cloudworks Runtime backlog owner=" + owner + " tickDebt="
-                        + (player.requestedTick - player.simulatedTick) + " pending=" + executor.pendingCount());
+                Mekanism.logger.warn("Cloudworks Runtime backlog owner={} tickDebt={} pending={}",
+                        owner, player.requestedTick - player.simulatedTick, executor.pendingCount());
             }
             if (player.task != null || executor.scheduled(owner)) continue;
             CloudworksPlayerRuntime world = executor.runtime(owner);
-            java.util.List<CloudworksExternalEvent> ingress = manager.runtimeIngressAfter(owner, world.externalSequence());
+            List<CloudworksExternalEvent> ingress = manager.runtimeIngressAfter(owner, world.externalSequence());
             boolean unknownResource = ingress != null && ingress.stream().anyMatch(event -> !world.knowsResource(event.resource()));
-            if (player.origin == null || !manager.onlyRuntimeIngressSince(owner, player.managerRevision)
-                    || !eligible.equals(player.lineIds) || ingress == null || unknownResource) {
+            boolean rebuild = player.origin == null || !manager.onlyRuntimeIngressSince(owner, player.managerRevision)
+                    || !eligible.equals(player.lineIds) || ingress == null || unknownResource;
+            if (rebuild || player.checkpoint == null) {
+                // Bound simultaneously retained cold snapshots, not normal owner ticks.
+                int coldCompilations = 0;
+                for (Player candidate : players.values())
+                    if (candidate.task != null && candidate.checkpoint == null) coldCompilations++;
+                if (coldCompilations >= coldCompilationLimit) continue;
+            }
+            if (rebuild) {
                 try {
                     player.origin = manager.captureRuntimeSnapshot(owner, eligible);
                     player.capture = null;
@@ -179,19 +212,21 @@ public final class CloudworksRuntimeService implements AutoCloseable {
                 for (CloudworksExternalEvent event : ingress) externalBridge.submit(owner, this, event);
             final Player selected = player;
             final CloudworksRuntimeCheckpoint previous = player.checkpoint;
-            final mekanism.cloudworks.common.service.CloudworksResourceSymbols symbols = manager.symbols(owner);
+            final CloudworksResourceSymbols symbols = manager.symbols(owner);
             final long startTick = player.simulatedTick;
             final long targetTick = player.requestedTick;
             final CloudworksRuntimeClock.Cursor clock = player.clock.snapshot();
             final long previousVersion = player.stateVersion;
-            if (previous == null) mekanism.cloudworks.common.service.CloudworksNativeContracts.prime(symbols, player.origin);
+            final List<ProductionLineData> decodedLines = previous == null ? player.origin.lines() : null;
+            if (previous == null) CloudworksNativeContracts.prime(symbols, player.origin, decodedLines);
             final CloudworksRuntimeHeatFuel preFrozenHeat = previous == null && player.origin.hasHeatFuel()
                     ? CloudworksRuntimeHeatFuel.freeze(symbols, player.environment) : null;
-            final java.util.Map<UUID, mekanism.cloudworks.api.CloudworksGenerationPlan> preFrozenGeneration =
-                    previous == null ? mekanism.cloudworks.common.service.CloudworksNativeContracts.generationPlans(
-                            player.origin, player.environment) : java.util.Collections.emptyMap();
-            java.util.concurrent.FutureTask<Completion> task = new java.util.concurrent.FutureTask<>(() ->
-                    mekanism.cloudworks.common.service.CloudworksNativeContracts.worker(() -> {
+            final Map<UUID, CloudworksGenerationPlan> preFrozenGeneration =
+                    previous == null ? CloudworksNativeContracts.generationPlans(
+                            player.origin, player.environment, decodedLines) : Collections.emptyMap();
+            if (previous == null) CloudworksNativeContracts.primeGeneration(symbols, preFrozenGeneration);
+            FutureTask<Completion> task = new FutureTask<>(() ->
+                    CloudworksNativeContracts.worker(() -> {
                 long started = System.nanoTime();
                 if (previous == null) {
                     // Compile against a stable symbol generation. Native
@@ -199,11 +234,9 @@ public final class CloudworksRuntimeService implements AutoCloseable {
                     // registers a new descriptor concurrently, rebuild once
                     // with the expanded append-only dictionary.
                     int compileAttempts = 0;
-                    java.util.List<mekanism.cloudworks.common.data.ProductionLineData> decodedLines;
                     while (true) {
-                        decodedLines = selected.origin.lines();
                         selected.capture = CloudworksDetachedState.captureRuntime(selected.origin, symbols,
-                                selected.environment, decodedLines);
+                                selected.environment, decodedLines, preFrozenGeneration);
                         CloudworksRuntimeCatalog catalog = CloudworksRuntimeCatalog.prepare(selected.capture, symbols,
                                 decodedLines, preFrozenHeat, preFrozenGeneration);
                         long catalogGeneration = symbols.generation();
@@ -234,7 +267,7 @@ public final class CloudworksRuntimeService implements AutoCloseable {
     }
 
     private void evictIdleOwner(UUID owner, Player player,
-            mekanism.cloudworks.common.service.CloudworksPlayerDataManager manager, boolean poisoned) {
+            CloudworksPlayerDataManager manager, boolean poisoned) {
         if (player != null && (player.task != null || executor.scheduled(owner))) return;
         try {
             if (!poisoned) manager.flushRuntimePending(owner);
@@ -244,7 +277,7 @@ public final class CloudworksRuntimeService implements AutoCloseable {
         }
     }
 
-    private static boolean relayEnergyNeedsRuntime(mekanism.cloudworks.common.data.CloudworksData cloud) {
+    private static boolean relayEnergyNeedsRuntime(CloudworksData cloud) {
         return cloud.receivingEnergy() > 0 && cloud.energyFlowReceivingToCloud()
                 || cloud.energy() > 0 && cloud.energyFlowCloudToSending();
     }
@@ -280,7 +313,7 @@ public final class CloudworksRuntimeService implements AutoCloseable {
         clear();
     }
 
-    public void close(mekanism.cloudworks.common.service.CloudworksPlayerDataManager manager) {
+    public void close(CloudworksPlayerDataManager manager) {
         long deadlineNanos = System.nanoTime() + SHUTDOWN_TIMEOUT_NANOS;
         closed = true;
         executor.close(deadlineNanos);
@@ -313,9 +346,11 @@ public final class CloudworksRuntimeService implements AutoCloseable {
             } catch (InterruptedException interruption) {
                 interrupted = true;
             } catch (TimeoutException timeout) {
-                System.err.println("Cloudworks Runtime shutdown skipped a late checkpoint for owner=" + player.owner);
-            } catch (java.util.concurrent.ExecutionException | RuntimeException failure) {
-                System.err.println("Cloudworks Runtime shutdown owner=" + player.owner + ": " + failure);
+                Mekanism.logger.warn(
+                        "Cloudworks Runtime shutdown skipped a late checkpoint for owner={}", player.owner);
+            } catch (ExecutionException | RuntimeException failure) {
+                Mekanism.logger.warn("Cloudworks Runtime shutdown failed for owner {}",
+                        player.owner, failure);
             }
         }
         clear();
@@ -323,7 +358,7 @@ public final class CloudworksRuntimeService implements AutoCloseable {
     }
 
     private static boolean awaitShutdownPersistence(
-            mekanism.cloudworks.common.service.CloudworksPlayerDataManager manager, long deadlineNanos) {
+            CloudworksPlayerDataManager manager, long deadlineNanos) {
         long remaining = deadlineNanos - System.nanoTime();
         if (remaining <= 0) return false;
         try {
@@ -340,6 +375,11 @@ public final class CloudworksRuntimeService implements AutoCloseable {
     }
 
     public int pendingCount() { return executor.pendingCount(); }
+
+    public boolean compiled(UUID owner) {
+        Player player = players.get(owner);
+        return player != null && player.origin != null && player.checkpoint != null;
+    }
 
     public long tickDebt(UUID owner) {
         Player player = players.get(owner);
@@ -410,13 +450,13 @@ public final class CloudworksRuntimeService implements AutoCloseable {
                 stateVersion, lastSubmittedTick;
         int failures;
         Throwable failure;
-        mekanism.cloudworks.common.service.CloudworksPlayerDataManager.VirtualSnapshot origin;
+        CloudworksPlayerDataManager.VirtualSnapshot origin;
         CloudworksDetachedState.Capture capture;
-        mekanism.cloudworks.api.CloudworksGenerationContext environment;
+        CloudworksGenerationContext environment;
         CloudworksRuntimeCheckpoint checkpoint;
         CloudworksRuntimeColdData coldData;
-        java.util.List<UUID> lineIds;
-        java.util.concurrent.FutureTask<Completion> task;
+        List<UUID> lineIds;
+        FutureTask<Completion> task;
 
         Player(UUID owner) { this.owner = owner; }
     }

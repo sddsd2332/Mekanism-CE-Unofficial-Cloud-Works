@@ -15,13 +15,22 @@ import mekanism.common.util.text.TextUtils;
 /** Selects resource identities, never inserts or extracts physical inventory contents. */
 public final class GuiLineResourceGrid extends GuiCloudQIOResourceGrid implements IRecipeViewerGhostTarget {
     private final Supplier<List<Entry>> entries;
+    private final Supplier<QIOResourceDescriptor> selected;
     private final Consumer<QIOResourceDescriptor> select, remove, add;
 
     public GuiLineResourceGrid(IGuiWrapper gui, int x, int y, int columns, int rows,
             Supplier<List<Entry>> entries, Consumer<QIOResourceDescriptor> select,
             Consumer<QIOResourceDescriptor> remove, Consumer<QIOResourceDescriptor> add) {
+        this(gui, x, y, columns, rows, entries, () -> null, select, remove, add);
+    }
+
+    public GuiLineResourceGrid(IGuiWrapper gui, int x, int y, int columns, int rows,
+            Supplier<List<Entry>> entries, Supplier<QIOResourceDescriptor> selected,
+            Consumer<QIOResourceDescriptor> select,
+            Consumer<QIOResourceDescriptor> remove, Consumer<QIOResourceDescriptor> add) {
         super(gui, x, y, columns, rows, entries);
         this.entries = entries;
+        this.selected = selected;
         this.select = select;
         this.remove = remove;
         this.add = add;
@@ -51,6 +60,11 @@ public final class GuiLineResourceGrid extends GuiCloudQIOResourceGrid implement
     protected List<Entry> getSortedEntries() {
         // The catalog owns sorting; rebuilding and sorting thousands of resources per rendered slot is unnecessary.
         return entries.get();
+    }
+
+    @Override
+    protected boolean isSelected(QIOResourceEntry entry) {
+        return entry.getDescriptor().equals(selected.get());
     }
 
     @Override

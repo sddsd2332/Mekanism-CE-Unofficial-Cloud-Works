@@ -1,228 +1,102 @@
 package mekanism.cloudworks.common.recipe;
 
-import mekanism.cloudworks.api.CloudworksMachineAdapter;
+import java.util.*;
+import mekanism.cloudworks.api.machine.CloudworksMachineAdapter;
+import mekanism.cloudworks.common.registry.CloudworksMachineAdapters;
 import mekanism.common.recipe.RecipeHandler;
+import mekanism.cloudworks.api.machine.CloudworksMachineRegistration;
+import mekanism.cloudworks.common.service.CloudworksNativeContracts;
 
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.Optional;
-
-/**
- * Registrable async admission. A machine adapter class enters the worker path
- * only after an {@link AuditContract} has been registered for it; unknown and
- * special adapters stay on the owner thread. Every refusal carries a reason so
- * unsupported machines are diagnosed, never silently dropped.
- */
+/** Lifecycle compiler cache. The only executable addon contract is the public freeze API. */
 public final class CloudworksAsyncRecipeAdmission {
-    private static final Map<Class<?>, AuditContract> AUDITED = new LinkedHashMap<>();
-    /**
-     * Contract for deterministic native recipe adapters.
-     */
-    private static final AuditContract NATIVE_CONTRACT = new AuditContract() {
-        @Override
-        public Optional<CloudworksFrozenRecipeView> capture(CloudworksMachineAdapter adapter) {
-            if (!(adapter instanceof CloudworksNativeRecipeAdapter<?> nativeAdapter)) return Optional.empty();
-            return nativeAdapter.captureFrozenView();
-        }
+    private static final Map<CloudworksMachineAdapter, Optional<CloudworksFrozenRecipeView>> FROZEN =
+            new IdentityHashMap<>();
+    private static boolean complete;
+    private static Thread owner;
 
-        @Override
-        public String describeRejection(CloudworksMachineAdapter adapter) {
-            if (!(adapter instanceof CloudworksNativeRecipeAdapter)) return "not a deterministic native recipe adapter";
-            return "native freeze refused: no safe matcher, oversized group or registry changed mid-capture";
-        }
-    };
-    /**
-     * Contract for chance adapters: per-operation rolls happen in the worker from frozen parameters.
-     */
-    private static final AuditContract CHANCE_CONTRACT = new AuditContract() {
-        @Override
-        public Optional<CloudworksFrozenRecipeView> capture(CloudworksMachineAdapter adapter) {
-            if (!(adapter instanceof FreezableView freezable)) return Optional.empty();
-            return freezable.captureFrozenView();
-        }
+    private CloudworksAsyncRecipeAdmission() {}
 
-        @Override
-        public String describeRejection(CloudworksMachineAdapter adapter) {
-            if (!(adapter instanceof FreezableView)) return "not a freezable chance adapter";
-            return "chance freeze refused: unfreezable matcher or registry changed mid-capture";
-        }
-    };
-    private static final Class<?>[] BUILT_INS = {
-            CloudworksContractRecipeAdapter.class,
-            CloudworksSPSRecipeAdapter.class,
-            CloudworksBoilerRecipeAdapter.class,
-            CloudworksFissionReactorRecipeAdapter.class,
-            CloudworksTurbineRecipeAdapter.class,
-            CloudworksFusionReactorRecipeAdapter.class,
-            CloudworksBasicItemRecipeAdapter.class,
-            CloudworksDoubleItemRecipeAdapter.class,
-            CloudworksAdvancedGasItemRecipeAdapter.class,
-            CloudworksInfuserRecipeAdapter.class,
-            CloudworksPressurizedRecipeAdapter.class,
-            CloudworksDissolutionRecipeAdapter.class,
-            CloudworksGasFluidRecipeAdapter.class,
-            CloudworksGasGasRecipeAdapter.class,
-            CloudworksGasItemRecipeAdapter.class,
-            CloudworksItemGasOutputRecipeAdapter.class,
-            CloudworksChemicalPairRecipeAdapter.class,
-            CloudworksSeparatorRecipeAdapter.class,
-            CloudworksRotaryRecipeAdapter.class,
-            CloudworksVoidMineralRecipeAdapter.class,
-            CloudworksWasteBarrelRecipeAdapter.class,
-            CloudworksThermalEvaporationRecipeAdapter.class,
-            CloudworksSolarNeutronRecipeAdapter.class,
-            CloudworksNutritionalRecipeAdapter.class,
-            CloudworksNucleosynthesizerRecipeAdapter.class,
-            CloudworksReplicatorItemRecipeAdapter.class,
-            CloudworksReplicatorGasRecipeAdapter.class,
-            CloudworksReplicatorFluidRecipeAdapter.class,
-            CloudworksFusionCoolingRecipeAdapter.class};
-    /**
-     * Chance adapters admitted through {@link FreezableView}: rolled per operation in the worker.
-     */
-    private static final Class<?>[] CHANCE_BUILT_INS = {
-            CloudworksChanceItemRecipeAdapter.class,
-            CloudworksChance2ItemRecipeAdapter.class,
-            CloudworksAmbientGasRecipeAdapter.class,
-            CloudworksFarmRecipeAdapter.class};
-    /**
-     * Fuel-contract generators admitted through {@link FreezableView}: the
-     * worker burns the frozen fuel and reports the actual generation (GPT fuel
-     * contract design; replaces the prepare-time constant).
-     */
-    private static final Class<?>[] FUEL_BUILT_INS = {
-            CloudworksGasGeneratorAdapter.class,
-            CloudworksItemGeneratorAdapter.class,
-            CloudworksHeatFuelAdapter.class};
-    private static boolean bootstrapped;
-
-    private CloudworksAsyncRecipeAdmission() {
-    }
-
-    /**
-     * Seeds the built-in classes without touching the registry version: they are
-     * part of the initial state, and a lazily-triggered version bump between a
-     * capture and its commit would poison the transaction.
-     */
-    private static void ensureBootstrapped() {
-        if (bootstrapped) return;
-        synchronized (CloudworksAsyncRecipeAdmission.class) {
-            if (bootstrapped) return;
-            for (Class<?> type : BUILT_INS) AUDITED.put(type, NATIVE_CONTRACT);
-            for (Class<?> type : CHANCE_BUILT_INS) AUDITED.put(type, CHANCE_CONTRACT);
-            for (Class<?> type : FUEL_BUILT_INS) AUDITED.put(type, CHANCE_CONTRACT);
-            bootstrapped = true;
-        }
-    }
-
-    /**
-     * Registers the audit contract of one adapter class. Registration re-uses the
-     * machine registry version counter, so in-flight transactions re-validate.
-     */
-    public static void registerAudited(Class<?> type, AuditContract contract) {
-        if (type == null || contract == null || !CloudworksMachineAdapter.class.isAssignableFrom(type))
-            throw new IllegalArgumentException("Invalid async admission registration");
-        ensureBootstrapped();
-        synchronized (CloudworksAsyncRecipeAdmission.class) {
-            AUDITED.put(type, contract);
-        }
-        mekanism.cloudworks.common.registry.CloudworksRegistries.adapterRegistered();
-    }
-
-    public static Optional<CloudworksFrozenRecipeView> capture(CloudworksMachineAdapter adapter) {
+    public static synchronized Optional<CloudworksFrozenRecipeView> capture(CloudworksMachineAdapter adapter) {
         if (adapter == null) return Optional.empty();
-        ensureBootstrapped();
-        AuditContract contract;
-        synchronized (CloudworksAsyncRecipeAdmission.class) {
-            contract = AUDITED.get(adapter.getClass());
-        }
-        if (contract == null) return Optional.empty();
-        return contract.capture(adapter);
+        Optional<CloudworksFrozenRecipeView> cached = FROZEN.get(adapter);
+        if (cached != null && (!cached.isPresent() || current(cached.get()))) return cached;
+        if (complete || CloudworksNativeContracts.isWorker()
+                || owner != null && owner != Thread.currentThread()) return Optional.empty();
+        Optional<CloudworksFrozenRecipeView> view = CloudworksRecipeCompiler.capture(
+                adapter, CloudworksMachineAdapters.registration(adapter));
+        FROZEN.put(adapter, view);
+        return view;
     }
 
-    /**
-     * Freeze entry for special adapters (fuel generators). They stay outside
-     * {@code CloudworksMachineAdapters} for compatibility with the recipe registration API;
-     * only classes admitted above and implementing {@link FreezableView} freeze.
-     */
-    public static Optional<CloudworksFrozenRecipeView> captureSpecial(SpecialMachineAdapter special) {
-        if (!(special instanceof FreezableView freezable)) return Optional.empty();
-        ensureBootstrapped();
-        synchronized (CloudworksAsyncRecipeAdmission.class) {
-            if (!AUDITED.containsKey(special.getClass())) return Optional.empty();
-        }
-        return freezable.captureFrozenView();
+    /** Reads an already frozen contract without invoking native adapters or registry callbacks. */
+    public static synchronized Optional<CloudworksFrozenRecipeView> peek(CloudworksMachineAdapter adapter) {
+        Optional<CloudworksFrozenRecipeView> cached = FROZEN.get(adapter);
+        return cached != null && cached.isPresent() && current(cached.get()) ? cached : Optional.empty();
     }
 
-    /**
-     * Why a special adapter is (or would be) refused; never null, for diagnostics.
-     */
-    public static String specialRejectionReason(SpecialMachineAdapter special) {
-        if (special == null) return "no special adapter";
-        ensureBootstrapped();
-        boolean audited;
-        synchronized (CloudworksAsyncRecipeAdmission.class) {
-            audited = AUDITED.containsKey(special.getClass());
-        }
-        // Legacy bridge-only specials keep the historical umbrella diagnosis.
-        if (!audited || !(special instanceof FreezableView))
-            return "special machine adapter is not frozen yet";
-        return "fuel freeze refused: unfreezable fuel ingredient or registry changed mid-capture";
+    /** Lifecycle-only derived data; never reopens arbitrary adapter callbacks on Runtime workers. */
+    public static synchronized CloudworksFrozenRecipeView admitDerived(CloudworksMachineAdapter adapter,
+            CloudworksMachineRegistration registration) {
+        if (CloudworksNativeContracts.isWorker())
+            throw new IllegalStateException("Derived contracts cannot freeze on Runtime workers");
+        CloudworksFrozenRecipeView view = CloudworksRecipeCompiler.capture(adapter, registration)
+                .orElseThrow(() -> new IllegalArgumentException("Mechanism recipe freeze refused"));
+        FROZEN.put(adapter, Optional.of(view));
+        return view;
     }
 
-    /**
-     * Why this adapter is (or would be) refused; never null, for diagnostics.
-     */
+    public static synchronized void freezeRegisteredAdapters() {
+        if (complete) return;
+        CloudworksPumpRecipes.freeze();
+        owner = Thread.currentThread();
+        for (List<CloudworksMachineAdapter> adapters : CloudworksMachineAdapters.snapshot().values())
+            for (CloudworksMachineAdapter adapter : adapters) capture(adapter);
+        complete = true;
+    }
+
     public static String rejectionReason(CloudworksMachineAdapter adapter) {
-        if (adapter == null) return "no adapter";
-        ensureBootstrapped();
-        AuditContract contract;
-        synchronized (CloudworksAsyncRecipeAdmission.class) {
-            contract = AUDITED.get(adapter.getClass());
-        }
-        if (contract == null)
-            return "adapter class not registered for async admission (default deny): "
-                    + adapter.getClass().getName();
-        return contract.describeRejection(adapter);
+        return adapter == null ? "no recipe adapter" : "API recipe freeze refused: " + adapter.getClass().getName();
     }
 
-    /**
-     * A captured view is stale after any recipe registry mutation.
-     */
     public static boolean current(CloudworksFrozenRecipeView view) {
         return view != null && view.sourceVersion() == RecipeHandler.getGlobalRecipeVersion();
     }
 
-    /**
-     * Read-only snapshot of the audited classes; coverage audits use this.
-     */
-    public static synchronized Map<Class<?>, AuditContract> auditedClasses() {
-        ensureBootstrapped();
-        return Collections.unmodifiableMap(new LinkedHashMap<>(AUDITED));
+    public static synchronized Object checkpoint() {
+        return new Snapshot(new IdentityHashMap<>(FROZEN), complete, owner, CloudworksPumpRecipes.checkpoint());
     }
 
-    /**
-     * Freezes one adapter instance on the owner thread; empty means rejected.
-     */
-    public interface AuditContract {
-        Optional<CloudworksFrozenRecipeView> capture(CloudworksMachineAdapter adapter);
+    public static synchronized void restore(Object checkpoint) {
+        Snapshot snapshot = (Snapshot) checkpoint;
+        FROZEN.clear();
+        FROZEN.putAll(snapshot.views);
+        complete = snapshot.complete;
+        owner = snapshot.owner;
+        CloudworksPumpRecipes.restore(snapshot.pumps);
+    }
 
-        /**
-         * Human-readable refusal used for diagnostics and coverage audits.
-         */
-        default String describeRejection(CloudworksMachineAdapter adapter) {
-            return "audit contract refused the adapter instance";
+    public static synchronized void resetForTests() {
+        FROZEN.clear();
+        complete = false;
+        owner = null;
+        CloudworksPumpRecipes.resetForTests();
+    }
+    static synchronized void invalidatePumpAdapters() {
+        if (complete) throw new IllegalStateException("Pump recipe admission is frozen");
+        FROZEN.keySet().removeIf(adapter -> adapter instanceof CloudworksPumpRecipeAdapter);
+    }
+
+    private static final class Snapshot {
+        final Map<CloudworksMachineAdapter, Optional<CloudworksFrozenRecipeView>> views;
+        final boolean complete;
+        final Thread owner;
+        final Object pumps;
+        Snapshot(Map<CloudworksMachineAdapter, Optional<CloudworksFrozenRecipeView>> views,
+                boolean complete, Thread owner, Object pumps) {
+            this.views = views;
+            this.complete = complete;
+            this.owner = owner;
+            this.pumps = pumps;
         }
-    }
-
-    /**
-     * Adapters that freeze an audited pure view themselves (chance recipes).
-     */
-    public interface FreezableView {
-        /**
-         * Owner-thread freeze; empty means rejected and must carry a diagnostic reason.
-         */
-        Optional<CloudworksFrozenRecipeView> captureFrozenView();
     }
 }

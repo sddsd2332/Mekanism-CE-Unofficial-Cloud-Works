@@ -1,6 +1,6 @@
 # 云工坊已接入机器与配方清单
 
-核对日期：2026-10-11。
+核对日期：2026-10-26；本轮端口、互斥状态、升级及连续进料修正见 [原机端口对齐记录](CLOUDWORKS_NATIVE_PORT_ALIGNMENT_20261026.zh-CN.md)。
 
 本清单依据当前机器注册与适配器源码，不依据 GUI 中是否出现物品、JEI 中是否有配方或原模组是否提供同名机器。未注册的身份不能因为外观相同就当作已接入。
 
@@ -35,9 +35,9 @@
 | 净化仓 | `tile.MachineBlock.PurificationChamber.name` | `PURIFICATION_CHAMBER` | 物品 + 辅助气体 → 物品 |
 | 锇压缩机 | `tile.MachineBlock.OsmiumCompressor.name` | `OSMIUM_COMPRESSOR` | 物品 + 辅助气体 → 物品 |
 | 化学压射室 | `tile.MachineBlock2.ChemicalInjectionChamber.name` | `CHEMICAL_INJECTION_CHAMBER` | 物品 + 辅助气体 → 物品 |
-| 化学氧化机 | `tile.MachineBlock2.ChemicalOxidizer.name` | `CHEMICAL_OXIDIZER` | 物品 → 气体 |
-| 环境气体收集器 | `tile.MachineBlock3.AmbientAccumulator.name` | `AMBIENT_ACCUMULATOR` | 无资源输入；按模拟维度选择概率气体输出 |
-| 环境气体收集器(电动型) | `tile.MachineBlock3.AmbientAccumulatorEnergy.name` | `AMBIENT_ACCUMULATOR_ENERGY` | 无资源输入；按模拟维度选择概率气体输出 |
+| 化学氧化机 | `tile.MachineBlock2.ChemicalOxidizer.name` | `CHEMICAL_OXIDIZER` | 物品 → 气体；输出容量复用本体 `MAX_GAS=10000` |
+| 环境气体收集器 | `tile.MachineBlock3.AmbientAccumulator.name` | `AMBIENT_ACCUMULATOR` | 无资源输入；按维度环境轴覆盖选择概率气体输出 |
+| 环境气体收集器(电动型) | `tile.MachineBlock3.AmbientAccumulatorEnergy.name` | `AMBIENT_ACCUMULATOR_ENERGY` | 无资源输入；按维度环境轴覆盖选择概率气体输出 |
 | 热力蒸馏控制器 | `tile.BasicBlock.ThermalEvaporationController.name` | `THERMAL_EVAPORATION_PLANT` | 温度决定流体处理速度，支持外部热连接，不检查真实塔形状 |
 | 电阻加热装置 | `tile.MachineBlock3.ResistiveHeater.name` | `CloudworksThermalPlan.RESISTIVE` | 实际耗电按原生效率产热，可通过热端口供热 |
 | 木料加热器 | `tile.MachineBlock3.FuelwoodHeater.name` | `CloudworksThermalPlan.FUELWOOD` | 冻结燃料燃烧时间产热，保存剩余燃烧 tick 与容器返还 |
@@ -105,8 +105,10 @@
 | 高级太阳能发电机 | `tile.Generator.AdvancedSolarGenerator.name` | `CloudworksSolarGeneratorAdapter(true)` | 同上，读取高级太阳能配置 |
 | 热力发电机 | `tile.Generator.HeatGenerator.name` | `CloudworksHeatGeneratorAdapter` + `CloudworksHeatFuelAdapter` | 模拟岩浆/环境发电及物品、流体燃料合同，含容器返还 |
 | 燃气发电机 | `tile.Generator.GasGenerator.name` | `GAS_FUEL_TO_ENERGY_RECIPE` | 实际消耗节点气体，按冻结燃料配方结算能量 |
+| 生物质发电机 | `tile.Generator.BioGenerator.name` | `CloudworksBioGeneratorAdapter` | BioFuel/生物乙醇共用逐 tick 燃料额度，保存预付余量 |
+| 聚变反应堆控制器 | `REACTOR_CONTROLLER` | `CloudworksFusionReactorRecipeAdapter` | 原生聚变燃料/点火/等离子，水冷/非水冷模式；不绑定裂变配方 |
 
-共有 5 个可选默认身份。原有仅冷却的反应控制器默认绑定已取消；聚变燃料发电适配器由 CRT 指定整合包物品，见第 11 节。
+共有 7 个可选默认身份。控制器当前绑定完整聚变热力合同，CRT 仍可绑定其他物品。扩展规则见 [Mek/IC2 扩展](CLOUDWORKS_MEK_IC2_EXPANSION_20261025.zh-CN.md)。
 
 ## 5. MoreMachine 等级机器
 
@@ -118,7 +120,7 @@
 | 基础化学清洗机 | 高级化学清洗机 | 精英化学清洗机 | 终极化学清洗机 | `CHEMICAL_WASHER`：气体 + 流体 → 气体 |
 | 基础电解分离器 | 高级电解分离器 | 精英电解分离器 | 终极电解分离器 | `ELECTROLYTIC_SEPARATOR`：流体 → 左右气体 |
 | 基础同位素离心机 | 高级同位素离心机 | 精英同位素离心机 | 终极同位素离心机 | `ISOTOPIC_CENTRIFUGE`：气体 → 气体 |
-| 基础环境气体收集器(电动型) | 高级环境气体收集器(电动型) | 精英环境气体收集器(电动型) | 终极环境气体收集器(电动型) | 当前读取 `AMBIENT_ACCUMULATOR`：按模拟维度概率产气 |
+| 基础环境气体收集器(电动型) | 高级环境气体收集器(电动型) | 精英环境气体收集器(电动型) | 终极环境气体收集器(电动型) | 当前读取 `AMBIENT_ACCUMULATOR`：按维度环境轴覆盖概率产气 |
 | 基础太阳能中子活化器 | 高级太阳能中子活化器 | 精英太阳能中子活化器 | 终极太阳能中子活化器 | `SOLAR_NEUTRON_ACTIVATOR`：受模拟光照门控制的气体转换 |
 | 基础回旋式气液转换机 | 高级回旋式气液转换机 | 精英回旋式气液转换机 | 终极回旋式气液转换机 | `ROTARY_CONDENSENTRATOR`：每级一个四端口双向身份 |
 | 基础虚空矿物采掘机 | 高级虚空矿物采掘机 | 精英虚空矿物采掘机 | 终极虚空矿物采掘机 | `VoidMineralGeneratorUitls.getCanOre()`：每周期互斥抽取一种矿物 |
@@ -132,6 +134,7 @@
 | 基础营养液器 | 高级营养液器 | 精英营养液器 | 终极营养液器 | `NUTRITIONAL_LIQUIFIER`：物品 → 气体 |
 | 基础化学溶解室 | 高级化学溶解室 | 精英化学溶解室 | 终极化学溶解室 | `CHEMICAL_DISSOLUTION_CHAMBER`：物品 + 辅助气体 → 气体 |
 | 基础种植工厂 | 高级种植工厂 | 精英种植工厂 | 终极种植工厂 | `ORGANIC_FARM`：物品 + 气体/流体 → 确定及概率物品 |
+| 基础电动泵 | 高级电动泵 | 精英电动泵 | 终极电动泵 | 20t 周期产水，FILTER 改产重水；不是世界方块抽取 |
 
 对应 lang key 模板是 `tile.<机器名>.<等级>.name`：
 
@@ -155,6 +158,7 @@
 | 营养液器 | `TierNutritionalLiquifier` |
 | 化学溶解室 | `TierChemicalDissolutionChamber` |
 | 种植工厂 | `TierOrganicFarm` |
+| 电动泵 | `TierElectricPump` |
 
 `<等级>` 为 `Basic`、`Advanced`、`Elite`、`Ultimate`。
 
@@ -167,7 +171,7 @@
 - 种植工厂的基础辅助气体/流体预算按 200 tick 冻结；与 Mek 基础种植机当前预算不同。
 - 放射性废料桶不产生资源或能量，也不模拟辐射泄漏。
 
-18 个等级机器族对应 72 个等级组合，本节共 72 个执行身份。
+19 个等级机器族对应 76 个等级组合，本节共 76 个执行身份。
 
 ## 6. MoreMachine 复制机
 
@@ -182,7 +186,7 @@
 - 使用原配方 `ticks` 和每 tick 附加 `extraEnergy`，在途保存和恢复保持能耗。
 - 清空或卸载节点时，模板与其他资源一起走既有回收机制。
 
-加上本节三个身份，MoreMachine 共 21 个机器族、75 个执行身份。其中 16 个身份依赖 Generators。
+加上本节三个身份，MoreMachine 共 22 个机器族、79 个执行身份。其中 16 个身份依赖 Generators。
 
 ## 7. Mek MultiblockMachine 可选机器
 
@@ -197,7 +201,7 @@
 | 大型风力发电机 | `tile.LargeWindGenerator.name` | 大型风机冻结合同 | 独立风力配置、模拟主机高度 + 46 格，不限制维度 |
 | 大型燃气发电机 | `tile.LargeGasGenerator.name` | `GAS_FUEL_TO_ENERGY_RECIPE` | 配置并行和储能，复用现有气体燃料合同 |
 
-共 6 个身份。原生配置决定基础并行，随后由 Runtime 应用合并机器数、升级和 workRate。固定储罐容量不乘配置并行数；原生独立线程升级暂不增加。
+共 6 个身份。原生配置决定基础并行，随后由 Runtime 应用合并机器数、升级和 workRate。THREAD 按每台有效安装数量将基础 processes 乘以 `(1+N)`，覆盖加工和两个发电入口，并按原生扩储能；固定储罐不乘线程。
 
 这里只虚拟化这六台大型机器，不模拟真实占位方块、风机距离干扰、叶片伤害、爆炸和天空遮挡，不表示其他反应堆等多方块系统都已支持。
 
@@ -209,14 +213,14 @@
 
 | 范围 | 执行身份数 |
 | --- | ---: |
-| Mek 非工厂基础机器 | 36 |
+| Mek 非工厂基础机器 | 39 |
 | Mek 工厂等级/模式 | 76 |
-| Mek Generators 可选机器 | 5 |
-| MoreMachine 等级及复制机 | 75 |
+| Mek Generators 可选机器 | 7 |
+| MoreMachine 等级及复制机 | 79 |
 | Mek MultiblockMachine 大型机器 | 6 |
-| 所有可选依赖可用时的默认声明合计 | 198 |
+| 所有可选依赖可用时的默认声明合计 | 207 |
 
-未安装 Generators 时应扣除其 5 个本体默认身份、MoreMachine 16 个发电身份和 MultiblockMachine 2 个发电身份。未安装 MoreMachine 时其 75 个身份全部不存在；未安装 MultiblockMachine 时其 6 个身份全部不存在。CRT 注册的身份和别名不计入固定默认合计。
+未安装 Generators 时应扣除其 7 个本体默认身份、MoreMachine 16 个发电身份和 MultiblockMachine 2 个发电身份。未安装 MoreMachine 时其 79 个身份全部不存在；未安装 MultiblockMachine 时其 6 个身份全部不存在。CRT 注册的身份和别名不计入固定默认合计。新增本体身份为电动泵、SPS 和手动矿辞转换器；IC2/TE 等其他模组不计入本表。
 
 可选注册失败、原生配方表为空、配方无法冻结等情况下，声明数量不代表实际可用数量。不要以文档总数代替服务器实际注册结果。
 
@@ -225,9 +229,9 @@
 ### 9.1 机器范围
 
 - Mek 本体工厂实际存在的全部模式均已注册四级；种植工厂使用 MoreMachine 的基础/高级/精英/终极机器，不伪造不存在的 Mek `FARM` 模式。
-- MoreMachine 基础/高级/精英/终极电动泵未接入；涉及真实世界探测与抽取。
+- Mek 和 MoreMachine 电动泵已接入环境配方：海洋水/FILTER重水、下界熔岩，CRT可添加其他群系流体。共享并行、耗电和缓存限制，不复刻真实世界方块抽取。见 [泵规则](CLOUDWORKS_PUMP_ENVIRONMENT_RULES.zh-CN.md)。
 - MoreMachine 无线充电站和无线供能站未接入；操作真实玩家、实体或方块。
-- MoreMachine 特殊线程升级按项目约定暂不实现。
+- MultiblockMachine THREAD 已作为节点模块接入；不代表其他模组的同名升级自动获得兼容。
 - 本体多方块现提供 CRT 可绑定的资源／能量／动态热力合同，不表示真实结构、辐射或爆炸模拟，见第 11 节。
 - QIO/AE 网络本身不是产线机器节点；QIO 仅通过端口插件接入，AE 集成留给独立附属。
 
@@ -239,7 +243,7 @@
 - 普通 Mek 及 MoreMachine 电解仍使用原有基础能耗；MultiblockMachine 大型电解已单独启用原配方 `energyUsage` 冻结，不重复收取基础能耗。
 - 复制机和反质子核合成器/工厂明确保存并应用 `extraEnergy`；加压适配器尚未处理原配方额外能耗字段，不能把“读取了周期”理解为“所有能耗字段都已读取”。
 - 本体和 MoreMachine 回旋式气液转换机均使用四端口双向模型；一个双向原生条目展开为两个独立配方，不要求联合输入。它与真实机器一次只选一种 mode 的限制不同，云端不绑定上传时的方向。
-- 热力蒸馏控制器保留默认物品并接入动态温度；不检查真实塔高和形状。聚变／裂变等额外类型由 CRT 绑定，不再将仅冷却控制器当作默认聚变机。
+- 热力蒸馏控制器保留默认物品并接入动态温度；不检查真实塔高和形状。聚变控制器已默认绑定完整聚变合同；裂变等其他类型仍可由 CRT 绑定。
 - 部分 Mek 内置机器仍使用注册函数中的固定能耗、容量或周期，不是所有参数都跟随原机配置。
 - MoreMachine 的环境气体收集器(电动型)当前读取普通 `AMBIENT_ACCUMULATOR` 表；如果整合包单独修改电动型配方表，不能认为这里自动使用该独立表。
 - 环境发电和太阳能中子活化器使用云工坊模拟环境，昼夜时间每服务器 tick 跟随主世界；不复刻真实世界的天气、遮挡或每个区块的位置条件。

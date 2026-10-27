@@ -1,22 +1,40 @@
 package mekanism.cloudworks.common.registry;
 
 import mekanism.api.qio.resource.QIOResourceCodecs;
+import mekanism.cloudworks.api.CloudworksInfuseResourceCodec;
+import mekanism.cloudworks.api.machine.CloudworksMachineAdapter;
+import mekanism.cloudworks.api.machine.MachineExecutionProfile;
+import mekanism.cloudworks.api.machine.MachineIdentityPolicy;
 import mekanism.cloudworks.common.recipe.*;
-import mekanism.cloudworks.common.slot.MachineSlotLayout;
-import mekanism.common.MekanismBlocks;
-import mekanism.common.base.FactoryRecipeTypeCodec;
+import mekanism.cloudworks.api.machine.MachineSlotLayout;
+import mekanism.cloudworks.api.module.MachineUpgradePolicy;
+import mekanism.cloudworks.api.CloudworksAPI;
+import mekanism.cloudworks.api.machine.CloudworksMachineDefinition;
+import mekanism.cloudworks.api.recipe.CloudworksRecipeMode;
 import mekanism.common.base.IFactory.RecipeType;
+import mekanism.common.block.states.BlockStateBasic.BasicBlockType;
 import mekanism.common.block.states.BlockStateMachine.MachineType;
 import mekanism.common.recipe.RecipeHandler;
+import mekanism.common.tier.FactoryTier;
+import mekanism.common.util.MekanismUtils;
+import mekanism.common.tile.machine.TileEntityChemicalOxidizer;
+import mekanism.common.tier.GasTankTier;
 import mekanism.common.config.MekanismConfig;
+import mekanism.common.tile.multiblock.TileEntityThermalEvaporationController;
 import net.minecraft.item.ItemStack;
 
 import java.util.Collections;
+import java.util.Map;
+import mekanism.cloudworks.api.machine.CloudworksThermalContracts;
+import mekanism.cloudworks.api.machine.CloudworksThermalPlan;
+import mekanism.common.lib.radiation.RadiationUtil;
 
 /**
  * First built-in Mekanism adapters; additions stay behind the same registration API.
  */
 public final class CloudworksMekanismBuiltins {
+    private static final MachineIdentityPolicy FACTORY_IDENTITY =
+            MachineIdentityPolicy.keys("recipeTypeName", "recipeType", "recipeTypeVersion");
     private static boolean registered;
 
     private CloudworksMekanismBuiltins() {
@@ -25,257 +43,229 @@ public final class CloudworksMekanismBuiltins {
     public static synchronized void register() {
         if (registered) return;
         CloudworksInfuseResourceCodec.register();
+        CloudworksAPI.registerMachineModule(mekanism.cloudworks.common.integration.CloudworksGasUpgrade.type());
+        CloudworksAPI.registerMachine(new mekanism.cloudworks.api.machine.CloudworksMachineDefinition(
+                MachineType.OREDICTIONIFICATOR.getStack(), new MachineExecutionProfile(1, 0, 0, 1, MachineUpgradePolicy.NONE),
+                new MachineSlotLayout().add("item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64)
+                        .add("item_output", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 64),
+                MachineIdentityPolicy.none(), Collections.singletonList(new CloudworksRecipeMode("cloudworks:ore_conversion", 0, null,
+                        mekanism.cloudworks.common.recipe.CloudworksOredictionificator.registrationAdapter()))));
         MachineSlotLayout itemLayout = new MachineSlotLayout()
                 .add("item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64)
                 .add("item_output", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 64);
-        register(new ItemStack(MekanismBlocks.MachineBlock, 1, 3), RecipeHandler.Recipe.CRUSHER.get(), 6, itemLayout);
-        register(new ItemStack(MekanismBlocks.MachineBlock, 1, 0), RecipeHandler.Recipe.ENRICHMENT_CHAMBER.get(), 200, itemLayout);
-        registerDouble(new ItemStack(MekanismBlocks.MachineBlock, 1, 2), RecipeHandler.Recipe.COMBINER.get(), 100, itemLayout);
-        register(new ItemStack(MekanismBlocks.MachineBlock, 1, 10), RecipeHandler.Recipe.ENERGIZED_SMELTER.get(), 16, itemLayout);
+        // Ticks mirror the CEU native baseTicksRequired of each tile
+        // (TileEntityCrusher:14, TileEntityEnrichmentChamber:14, TileEntityCombiner:22,
+        // TileEntityEnergizedSmelter:14 are all 200).
+        register(MachineType.CRUSHER.getStack(), RecipeHandler.Recipe.CRUSHER.get(), 200, itemLayout);
+        register(MachineType.ENRICHMENT_CHAMBER.getStack(), RecipeHandler.Recipe.ENRICHMENT_CHAMBER.get(), 200, itemLayout);
+        registerDouble(MachineType.COMBINER.getStack(), RecipeHandler.Recipe.COMBINER.get(), 200, itemLayout);
+        register(MachineType.ENERGIZED_SMELTER.getStack(), RecipeHandler.Recipe.ENERGIZED_SMELTER.get(), 200, itemLayout);
         registerAdditionalItemMachines(itemLayout);
         MachineSlotLayout infuserLayout = new MachineSlotLayout()
                 .add("item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64)
                 .add("infuse_item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64)
                 .add("infuse_input", CloudworksInfuseResourceCodec.ID, MachineSlotLayout.PortRole.INPUT, 1000)
                 .add("item_output", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 64);
-        registerInfuser(new ItemStack(MekanismBlocks.MachineBlock, 1, 8), RecipeHandler.Recipe.METALLURGIC_INFUSER.get(), 100, infuserLayout);
+        // TileEntityMetallurgicInfuser:81 and TileEntityPrecisionSawmill:26 run 200 ticks.
+        registerInfuser(MachineType.METALLURGIC_INFUSER.getStack(), RecipeHandler.Recipe.METALLURGIC_INFUSER.get(), 200, infuserLayout);
         registerFactoryModes(itemLayout);
-        registerChance(new ItemStack(MekanismBlocks.MachineBlock2, 1, 5), RecipeHandler.Recipe.PRECISION_SAWMILL.get(), 100, itemLayout);
+        registerChance(MachineType.PRECISION_SAWMILL.getStack(), RecipeHandler.Recipe.PRECISION_SAWMILL.get(), 200, itemLayout);
         MachineSlotLayout gasLayout = new MachineSlotLayout()
                 .add("item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64)
-                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
+                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 210)
                 .add("item_output", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 64);
-        registerGas(new ItemStack(MekanismBlocks.MachineBlock, 1, 9), RecipeHandler.Recipe.PURIFICATION_CHAMBER.get(), 200, gasLayout);
-        registerGas(new ItemStack(MekanismBlocks.MachineBlock, 1, 1), RecipeHandler.Recipe.OSMIUM_COMPRESSOR.get(), 200, gasLayout);
-        registerGas(new ItemStack(MekanismBlocks.MachineBlock2, 1, 3), RecipeHandler.Recipe.CHEMICAL_INJECTION_CHAMBER.get(), 200, gasLayout);
-        registerGasOutput(new ItemStack(MekanismBlocks.MachineBlock2, 1, 1), RecipeHandler.Recipe.CHEMICAL_OXIDIZER.get(), 100,
+        registerGas(MachineType.PURIFICATION_CHAMBER.getStack(), RecipeHandler.Recipe.PURIFICATION_CHAMBER.get(), 200, gasLayout);
+        registerGas(MachineType.OSMIUM_COMPRESSOR.getStack(), RecipeHandler.Recipe.OSMIUM_COMPRESSOR.get(), 200, gasLayout);
+        registerGas(MachineType.CHEMICAL_INJECTION_CHAMBER.getStack(), RecipeHandler.Recipe.CHEMICAL_INJECTION_CHAMBER.get(), 200, gasLayout);
+        registerGasOutput(MachineType.CHEMICAL_OXIDIZER.getStack(), RecipeHandler.Recipe.CHEMICAL_OXIDIZER.get(), 100,
                 new MachineSlotLayout().add("item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64)
-                        .add("gas_output", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 1000));
+                        .add("gas_output", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT,
+                                TileEntityChemicalOxidizer.MAX_GAS));
         MachineSlotLayout ambientLayout = new MachineSlotLayout()
                 .add("gas_output", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 10000);
-        registerAmbient(new ItemStack(MekanismBlocks.MachineBlock3, 1, 2), RecipeHandler.Recipe.AMBIENT_ACCUMULATOR.get(), 20, ambientLayout);
-        registerAmbient(new ItemStack(MekanismBlocks.MachineBlock3, 1, 14), RecipeHandler.Recipe.AMBIENT_ACCUMULATOR_ENERGY.get(), 20, ambientLayout);
+        // TileEntityAmbientAccumulator:204 runs one roll per tick; the passive
+        // variant burns nothing and the electric variant pays its live usage.
+        registerAmbient(MachineType.AMBIENT_ACCUMULATOR.getStack(), RecipeHandler.Recipe.AMBIENT_ACCUMULATOR.get(),
+                0D, ambientLayout, MachineUpgradePolicy.NONE);
+        registerAmbient(MachineType.AMBIENT_ACCUMULATOR_ENERGY.getStack(), RecipeHandler.Recipe.AMBIENT_ACCUMULATOR_ENERGY.get(),
+                MachineType.AMBIENT_ACCUMULATOR_ENERGY.getUsage(),
+                new MachineSlotLayout().add("gas_output", QIOResourceCodecs.GAS_STACK_ID,
+                        MachineSlotLayout.PortRole.OUTPUT, GasTankTier.BASIC.getBaseStorage()), MachineUpgradePolicy.MEKANISM);
         MachineSlotLayout fluidLayout = new MachineSlotLayout()
-                .add("fluid_input", QIOResourceCodecs.FLUID_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
-                .add("fluid_output", QIOResourceCodecs.FLUID_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 1000);
-        ItemStack thermal = new ItemStack(MekanismBlocks.BasicBlock, 1, 14);
-        CloudworksRegistries.registerMachine(thermal, new MachineExecutionProfile(1, 0D, 0D, 100), fluidLayout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(thermal),
-                new CloudworksThermalEvaporationRecipeAdapter(RecipeHandler.Recipe.THERMAL_EVAPORATION_PLANT.get()));
-        CloudworksRegistries.registerThermal(thermal, evaporationThermalPlan());
+                .add("fluid_input", QIOResourceCodecs.FLUID_STACK_ID, MachineSlotLayout.PortRole.INPUT,
+                        (int) Math.min(Integer.MAX_VALUE, (long) TileEntityThermalEvaporationController.MAX_HEIGHT
+                                * 4L * Math.max(1, MekanismConfig.current().general.evaporationFluidPerTank.val())))
+                .add("fluid_output", QIOResourceCodecs.FLUID_STACK_ID, MachineSlotLayout.PortRole.OUTPUT,
+                        Math.max(1, MekanismConfig.current().general.evaporationOutputTankCapacity.val()));
+        ItemStack thermal = BasicBlockType.THERMAL_EVAPORATION_CONTROLLER.getStack(1);
+        CloudworksAPI.registerMachine(new CloudworksMachineDefinition(thermal,
+                new MachineExecutionProfile(1, 0D, 0D, 100, MachineUpgradePolicy.NONE), fluidLayout,
+                MachineIdentityPolicy.none(), Collections.singletonList(new CloudworksRecipeMode(
+                        "cloudworks:processing", 0, null,
+                        new CloudworksThermalEvaporationRecipeAdapter(RecipeHandler.Recipe.THERMAL_EVAPORATION_PLANT.get()))),
+                null, evaporationThermalPlan()));
         registerHeaters();
-        registerGasGeneratorIfPresent();
-        registerAmbientGeneratorsIfPresent();
+        mekanism.cloudworks.common.integration.CloudworksMultiblocks.sps(MachineType.SPS.getStack(), 1, MachineType.SPS.getStorage(), MachineIdentityPolicy.none());
+        CloudworksAPI.registerMachineModule(mekanism.cloudworks.common.integration.CloudworksPumpIntegration.filter());
+        mekanism.cloudworks.common.integration.CloudworksPumpIntegration.register(
+                MachineType.ELECTRIC_PUMP.getStack(), 1, MachineIdentityPolicy.none());
         MachineSlotLayout basePrcLayout = new MachineSlotLayout()
                 .add("item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64)
-                .add("fluid_input", QIOResourceCodecs.FLUID_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
-                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
+                .add("fluid_input", QIOResourceCodecs.FLUID_STACK_ID, MachineSlotLayout.PortRole.INPUT, 10000)
+                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 10000)
                 .add("item_output", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 64)
-                .add("gas_output", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 1000);
-        registerPressurized(new ItemStack(MekanismBlocks.MachineBlock2, 1, 10),
-                RecipeHandler.Recipe.PRESSURIZED_REACTION_CHAMBER.get(), 200, basePrcLayout);
+                .add("gas_output", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 10000);
+        // TileEntityPRC:87 runs 100 ticks.
+        registerPressurized(MachineType.PRESSURIZED_REACTION_CHAMBER.getStack(),
+                RecipeHandler.Recipe.PRESSURIZED_REACTION_CHAMBER.get(), 100, basePrcLayout);
         MachineSlotLayout gasPairLayout = new MachineSlotLayout()
-                .add("gas_input_left", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
-                .add("gas_input_right", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
-                .add("gas_output", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 1000);
-        ItemStack chemicalInfuser = new ItemStack(MekanismBlocks.MachineBlock2, 1, 2);
-        CloudworksRegistries.registerMachine(chemicalInfuser, new MachineExecutionProfile(1, 200D, 100), gasPairLayout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(chemicalInfuser),
-                new CloudworksChemicalPairRecipeAdapter(RecipeHandler.Recipe.CHEMICAL_INFUSER.get()));
+                .add("gas_input_left", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 10000)
+                .add("gas_input_right", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 10000)
+                .add("gas_output", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 10000);
+        ItemStack chemicalInfuser = MachineType.CHEMICAL_INFUSER.getStack();
+        // TileEntityChemicalInfuser:76 runs one operation per tick.
+        CloudworksAPI.registerMachine(chemicalInfuser, new MachineExecutionProfile(1, 200D, 1), gasPairLayout,
+                new CloudworksChemicalPairRecipeAdapter(RecipeHandler.Recipe.CHEMICAL_INFUSER.get()), MachineIdentityPolicy.none());
         MachineSlotLayout crystallizerLayout = new MachineSlotLayout()
-                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
+                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 10000)
                 .add("item_output", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 64);
-        ItemStack crystallizer = new ItemStack(MekanismBlocks.MachineBlock2, 1, 8);
-        CloudworksRegistries.registerMachine(crystallizer, new MachineExecutionProfile(1, 200D, 100), crystallizerLayout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(crystallizer),
-                new CloudworksGasItemRecipeAdapter(RecipeHandler.Recipe.CHEMICAL_CRYSTALLIZER.get()));
+        ItemStack crystallizer = MachineType.CHEMICAL_CRYSTALLIZER.getStack();
+        // TileEntityChemicalCrystallizer:79 runs 200 ticks.
+        CloudworksAPI.registerMachine(crystallizer, new MachineExecutionProfile(1, 200D, 200), crystallizerLayout,
+                new CloudworksGasItemRecipeAdapter(RecipeHandler.Recipe.CHEMICAL_CRYSTALLIZER.get()), MachineIdentityPolicy.none());
         MachineSlotLayout separatorLayout = new MachineSlotLayout()
-                .add("fluid_input", QIOResourceCodecs.FLUID_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
-                .add("gas_output_left", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 1000)
-                .add("gas_output_right", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 1000);
-        ItemStack separator = new ItemStack(MekanismBlocks.MachineBlock2, 1, 4);
-        CloudworksRegistries.registerMachine(separator, new MachineExecutionProfile(1, 200D, 100), separatorLayout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(separator),
-                new CloudworksSeparatorRecipeAdapter(RecipeHandler.Recipe.ELECTROLYTIC_SEPARATOR.get()));
-        MachineSlotLayout rotaryLayout = new MachineSlotLayout()
-                .add("fluid_input", QIOResourceCodecs.FLUID_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
-                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
-                .add("fluid_output", QIOResourceCodecs.FLUID_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 1000)
-                .add("gas_output", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 1000);
-        ItemStack rotary = new ItemStack(MekanismBlocks.MachineBlock2, 1, 0);
-        CloudworksRegistries.registerMachine(rotary, new MachineExecutionProfile(1, 200D, 100), rotaryLayout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(rotary),
-                new CloudworksRotaryRecipeAdapter(RecipeHandler.Recipe.ROTARY_CONDENSENTRATOR.get()));
+                .add("fluid_input", QIOResourceCodecs.FLUID_STACK_ID, MachineSlotLayout.PortRole.INPUT, 24000)
+                .add("gas_output_left", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 2400)
+                .add("gas_output_right", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 2400);
+        ItemStack separator = MachineType.ELECTROLYTIC_SEPARATOR.getStack();
+        // TileEntityElectrolyticSeparator:115 runs one operation per tick and its
+        // onCachedRecipeChanged (:188-197) replaces the base rate with each
+        // recipe's energyUsage — the MultiblockMachine registration pattern.
+        CloudworksAPI.registerMachine(separator, new MachineExecutionProfile(1, 0D,
+                MachineType.ELECTROLYTIC_SEPARATOR.getStorage(), 1), separatorLayout,
+                new CloudworksSeparatorRecipeAdapter(RecipeHandler.Recipe.ELECTROLYTIC_SEPARATOR.get(), true),
+                MachineIdentityPolicy.none());
+        ItemStack rotary = MachineType.ROTARY_CONDENSENTRATOR.getStack();
+        // TileEntityRotaryCondensentrator converts continuously (no ticks axis).
+        CloudworksAPI.registerMachine(new CloudworksMachineDefinition(rotary, new MachineExecutionProfile(1, 200D, 1),
+                CloudworksRotaryRecipeAdapter.fluidToGasLayout(10000), MachineIdentityPolicy.none(),
+                CloudworksRotaryRecipeAdapter.recipeTypes(RecipeHandler.Recipe.ROTARY_CONDENSENTRATOR.get())));
         MachineSlotLayout dissolutionLayout = new MachineSlotLayout()
                 .add("item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64)
-                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
-                .add("gas_output", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 1000);
-        ItemStack dissolution = new ItemStack(MekanismBlocks.MachineBlock2, 1, 6);
-        CloudworksRegistries.registerMachine(dissolution, new MachineExecutionProfile(1, 400D, 100), dissolutionLayout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(dissolution), new CloudworksDissolutionRecipeAdapter(RecipeHandler.Recipe.CHEMICAL_DISSOLUTION_CHAMBER.get()));
+                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 10000)
+                .add("gas_output", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 10000);
+        ItemStack dissolution = MachineType.CHEMICAL_DISSOLUTION_CHAMBER.getStack();
+        CloudworksAPI.registerMachine(dissolution, new MachineExecutionProfile(1, 400D, 100), dissolutionLayout,
+                new CloudworksDissolutionRecipeAdapter(RecipeHandler.Recipe.CHEMICAL_DISSOLUTION_CHAMBER.get()), MachineIdentityPolicy.none());
         MachineSlotLayout washerLayout = new MachineSlotLayout()
-                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
-                .add("fluid_input", QIOResourceCodecs.FLUID_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
-                .add("gas_output", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 1000);
-        ItemStack washer = new ItemStack(MekanismBlocks.MachineBlock2, 1, 7);
-        CloudworksRegistries.registerMachine(washer, new MachineExecutionProfile(1, 200D, 100), washerLayout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(washer), new CloudworksGasFluidRecipeAdapter(RecipeHandler.Recipe.CHEMICAL_WASHER.get()));
+                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 10000)
+                .add("fluid_input", QIOResourceCodecs.FLUID_STACK_ID, MachineSlotLayout.PortRole.INPUT, 10000)
+                .add("gas_output", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 10000);
+        ItemStack washer = MachineType.CHEMICAL_WASHER.getStack();
+        // TileEntityChemicalWasher:84 runs one operation per tick.
+        CloudworksAPI.registerMachine(washer, new MachineExecutionProfile(1, 200D, 1), washerLayout,
+                new CloudworksGasFluidRecipeAdapter(RecipeHandler.Recipe.CHEMICAL_WASHER.get()), MachineIdentityPolicy.none());
         MachineSlotLayout gasToGasLayout = new MachineSlotLayout()
-                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
-                .add("gas_output", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 1000);
-        ItemStack isotopic = new ItemStack(MekanismBlocks.MachineBlock3, 1, 9);
-        CloudworksRegistries.registerMachine(isotopic, new MachineExecutionProfile(1, 200D, 100), gasToGasLayout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(isotopic),
-                new CloudworksGasGasRecipeAdapter(RecipeHandler.Recipe.ISOTOPIC_CENTRIFUGE.get()));
-        ItemStack solar = new ItemStack(MekanismBlocks.MachineBlock3, 1, 1);
-        CloudworksRegistries.registerMachine(solar, new MachineExecutionProfile(1, 200D, 100), gasToGasLayout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(solar),
-                new CloudworksSolarNeutronRecipeAdapter(RecipeHandler.Recipe.SOLAR_NEUTRON_ACTIVATOR.get()));
+                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 10000)
+                .add("gas_output", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 10000);
+        ItemStack isotopic = MachineType.ISOTOPIC_CENTRIFUGE.getStack();
+        // TileEntityIsotopicCentrifuge:88 runs one operation per tick.
+        CloudworksAPI.registerMachine(isotopic, new MachineExecutionProfile(1, 200D, 1), gasToGasLayout,
+                new CloudworksGasGasRecipeAdapter(RecipeHandler.Recipe.ISOTOPIC_CENTRIFUGE.get()), MachineIdentityPolicy.none());
+        ItemStack solar = MachineType.SOLAR_NEUTRON_ACTIVATOR.getStack();
+        // TileEntitySolarNeutronActivator:88-90 runs one operation per tick and
+        // burns no energy (sunlight only), like the MoreMachine tier family.
+        CloudworksAPI.registerMachine(solar, new MachineExecutionProfile(1, 0D, 0D, 1, MachineUpgradePolicy.MEKANISM_SPEED),
+                gasToGasLayout,
+                new CloudworksSolarNeutronRecipeAdapter(RecipeHandler.Recipe.SOLAR_NEUTRON_ACTIVATOR.get()), MachineIdentityPolicy.none());
         MachineSlotLayout nutritionalLayout = new MachineSlotLayout()
                 .add("item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64)
-                .add("gas_output", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 1000);
-        ItemStack nutritional = new ItemStack(MekanismBlocks.MachineBlock3, 1, 10);
-        CloudworksRegistries.registerMachine(nutritional, new MachineExecutionProfile(1, 200D, 100), nutritionalLayout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(nutritional),
-                new CloudworksNutritionalRecipeAdapter(RecipeHandler.Recipe.NUTRITIONAL_LIQUIFIER.get()));
+                .add("gas_output", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 10000);
+        ItemStack nutritional = MachineType.NUTRITIONAL_LIQUIFIER.getStack();
+        CloudworksAPI.registerMachine(nutritional, new MachineExecutionProfile(1, 200D, 100), nutritionalLayout,
+                new CloudworksNutritionalRecipeAdapter(RecipeHandler.Recipe.NUTRITIONAL_LIQUIFIER.get()), MachineIdentityPolicy.none());
         MachineSlotLayout nucleosynthLayout = new MachineSlotLayout()
                 .add("item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64)
-                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
+                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 10000)
                 .add("item_output", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 64);
-        ItemStack nucleosynth = new ItemStack(MekanismBlocks.MachineBlock3, 1, 13);
-        CloudworksRegistries.registerMachine(nucleosynth, new MachineExecutionProfile(1, 200D, 100), nucleosynthLayout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(nucleosynth),
-                new CloudworksNucleosynthesizerRecipeAdapter(RecipeHandler.Recipe.ANTIPROTONIC_NUCLEOSYNTHESIZER.get()));
-        MachineSlotLayout farmLayout = new MachineSlotLayout()
-                .add("item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64)
-                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
-                .add("fluid_input", QIOResourceCodecs.FLUID_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
-                .add("item_output", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 64);
-        ItemStack farm = new ItemStack(MekanismBlocks.MachineBlock3, 1, 12);
-        CloudworksRegistries.registerMachine(farm, new MachineExecutionProfile(1, 200D, 200), farmLayout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(farm),
-                new CloudworksFarmRecipeAdapter(RecipeHandler.Recipe.ORGANIC_FARM.get()));
-        MachineSlotLayout chance2Layout = itemLayout;
-        registerChance(new ItemStack(MekanismBlocks.MachineBlock4, 1, 6), RecipeHandler.Recipe.CELL_EXTRACTOR.get(), 200, chance2Layout);
-        registerChance(new ItemStack(MekanismBlocks.MachineBlock4, 1, 7), RecipeHandler.Recipe.CELL_SEPARATOR.get(), 200, chance2Layout);
-        ItemStack recycler = new ItemStack(MekanismBlocks.MachineBlock4, 1, 8);
-        CloudworksRegistries.registerMachine(recycler, new MachineExecutionProfile(1, 50D, 200), chance2Layout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(recycler),
-                new CloudworksChance2ItemRecipeAdapter(RecipeHandler.Recipe.RECYCLER.get()));
-        ItemStack waste = mekanism.common.block.states.BlockStateMachine.MachineType.RADIOACTIVE_WASTE_BARREL.getStack();
-        CloudworksRegistries.registerMachine(waste, new MachineExecutionProfile(1, 0, 0,
-                        mekanism.common.lib.radiation.RadiationUtil.getWasteBarrelProcessTicks()),
+        ItemStack nucleosynth = MachineType.ANTIPROTONIC_NUCLEOSYNTHESIZER.getStack();
+        CloudworksAPI.registerMachine(nucleosynth, new MachineExecutionProfile(1, 200D, 100), nucleosynthLayout,
+                new CloudworksNucleosynthesizerRecipeAdapter(RecipeHandler.Recipe.ANTIPROTONIC_NUCLEOSYNTHESIZER.get()), MachineIdentityPolicy.none());
+        ItemStack farm = MachineType.ORGANIC_FARM.getStack();
+        CloudworksAPI.registerMachine(new CloudworksMachineDefinition(farm, new MachineExecutionProfile(1, 200D, 200),
+                CloudworksFarmRecipeAdapter.layout(1, true), MachineIdentityPolicy.none(),
+                CloudworksFarmRecipeAdapter.recipeTypes(RecipeHandler.Recipe.ORGANIC_FARM.get(), 1)));
+        registerChance(MachineType.CELL_EXTRACTOR.getStack(), RecipeHandler.Recipe.CELL_EXTRACTOR.get(), 200, itemLayout);
+        registerChance(MachineType.CELL_SEPARATOR.getStack(), RecipeHandler.Recipe.CELL_SEPARATOR.get(), 200, itemLayout);
+        ItemStack recycler = MachineType.RECYCLER.getStack();
+        CloudworksAPI.registerMachine(recycler, new MachineExecutionProfile(1, 50D, 200), itemLayout,
+                new CloudworksChance2ItemRecipeAdapter(RecipeHandler.Recipe.RECYCLER.get(), true), MachineIdentityPolicy.none());
+        ItemStack waste = MachineType.RADIOACTIVE_WASTE_BARREL.getStack();
+        CloudworksAPI.registerMachine(waste, new MachineExecutionProfile(1, 0, 0,
+                        RadiationUtil.getWasteBarrelProcessTicks(), MachineUpgradePolicy.NONE),
                 new MachineSlotLayout().add("gas_input", QIOResourceCodecs.GAS_STACK_ID,
-                        MachineSlotLayout.PortRole.INPUT, 512_000), Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(waste), new CloudworksWasteBarrelRecipeAdapter(1));
+                        MachineSlotLayout.PortRole.INPUT, 512_000), new CloudworksWasteBarrelRecipeAdapter(1), MachineIdentityPolicy.none());
+        for (MachineType gasMachine : new MachineType[]{MachineType.PURIFICATION_CHAMBER, MachineType.OSMIUM_COMPRESSOR,
+                MachineType.CHEMICAL_INJECTION_CHAMBER, MachineType.CHEMICAL_DISSOLUTION_CHAMBER, MachineType.ORGANIC_FARM})
+            CloudworksAPI.acceptMachineUpgrade(gasMachine.getStack(), mekanism.cloudworks.common.integration.CloudworksGasUpgrade.type(),
+                    mekanism.common.Upgrade.GAS.getMaxInstalled());
         registered = true;
-    }
-
-    private static void registerAmbientGeneratorsIfPresent() {
-        if (!net.minecraftforge.fml.common.Loader.isModLoaded("mekanismgenerators")) return;
-        try {
-            Class<?> blocksClass = Class.forName("mekanism.generators.common.GeneratorsBlocks");
-            net.minecraft.block.Block generator = (net.minecraft.block.Block) blocksClass.getField("Generator").get(null);
-            MachineSlotLayout empty = new MachineSlotLayout();
-            registerAmbientGenerator(new ItemStack(generator, 1, 6), MekanismConfig.current().generators.windGeneratorStorage.val(),
-                    new CloudworksWindGeneratorAdapter(
-                            MekanismConfig.current().generators.windGenerationMin.val(),
-                            MekanismConfig.current().generators.windGenerationMax.val(),
-                            MekanismConfig.current().generators.windGenerationMinY.val(),
-                            MekanismConfig.current().generators.windGenerationMaxY.val(), 0), empty);
-            registerAmbientGenerator(new ItemStack(generator, 1, 1), MekanismConfig.current().generators.solarGeneratorStorage.val(),
-                    new CloudworksSolarGeneratorAdapter(false), empty);
-            registerAmbientGenerator(new ItemStack(generator, 1, 5), MekanismConfig.current().generators.advancedSolarGeneratorStorage.val(),
-                    new CloudworksSolarGeneratorAdapter(true), empty);
-            registerAmbientGenerator(new ItemStack(generator, 1, 0),
-                    MekanismConfig.current().generators.heatGeneratorStorage.val(),
-                    new CloudworksHeatGeneratorAdapter(),
-                    new MachineSlotLayout()
-                            .add("item_input", QIOResourceCodecs.ITEM_STACK_ID,
-                                    MachineSlotLayout.PortRole.INPUT, 64)
-                            .add("fluid_input", QIOResourceCodecs.FLUID_STACK_ID,
-                                    MachineSlotLayout.PortRole.INPUT, Math.max(1, MekanismConfig.current().generators.heatTankCapacity.val()))
-                            .add("item_output", QIOResourceCodecs.ITEM_STACK_ID,
-                                    MachineSlotLayout.PortRole.OUTPUT, 64));
-            ItemStack heat = new ItemStack(generator, 1, 0);
-            CloudworksRegistries.registerSpecial(heat, new CloudworksHeatFuelAdapter());
-            CloudworksRegistries.registerThermal(heat,
-                    mekanism.cloudworks.common.integration.CloudworksThermalContracts.heatGenerator());
-        } catch (ReflectiveOperationException | RuntimeException ignored) {
-            // Optional generators module.
-        }
-    }
-
-    private static void registerAmbientGenerator(ItemStack machine, double capacity,
-                                                  mekanism.cloudworks.api.CloudworksEnergyGenerator generator,
-                                                  MachineSlotLayout layout) {
-        CloudworksRegistries.registerMachine(machine, new MachineExecutionProfile(1, 0D, capacity, 1),
-                layout, Collections.emptyList());
-        CloudworksRegistries.registerEnergyGenerator(machine, generator);
     }
 
     static void registerHeaters() {
         ItemStack resistive = MachineType.RESISTIVE_HEATER.getStack();
-        try {
-            if (!CloudworksRegistries.isRegistered(resistive)) {
-                mekanism.cloudworks.api.CloudworksThermalPlan plan =
-                        mekanism.cloudworks.common.integration.CloudworksThermalContracts.resistive();
-                CloudworksRegistries.registerMachine(resistive, new MachineExecutionProfile(1, 100D, 40000D, 1),
-                        new MachineSlotLayout(), Collections.emptyList());
-                CloudworksRegistries.registerThermal(resistive, plan);
-            }
-        } catch (RuntimeException failure) {
-            mekanism.common.Mekanism.logger.error("Could not register Cloudworks resistive heater", failure);
-        }
+        CloudworksThermalPlan resistivePlan =
+                CloudworksThermalContracts.resistive();
+        CloudworksAPI.registerMachine(new CloudworksMachineDefinition(resistive, new MachineExecutionProfile(1, 100D, 40000D, 1,
+                MachineUpgradePolicy.NONE),
+                new MachineSlotLayout(), MachineIdentityPolicy.none(), Collections.emptyList(), null, resistivePlan));
         ItemStack fuelwood = MachineType.FUELWOOD_HEATER.getStack();
-        try {
-            if (!CloudworksRegistries.isRegistered(fuelwood)) {
-                mekanism.cloudworks.api.CloudworksThermalPlan plan =
-                        mekanism.cloudworks.common.integration.CloudworksThermalContracts.fuelwood();
-                CloudworksRegistries.registerMachine(fuelwood, new MachineExecutionProfile(1, 0, 0, 1),
-                        new MachineSlotLayout()
-                                .add("item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64)
-                                .add("item_output", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 64),
-                        Collections.emptyList());
-                CloudworksRegistries.registerThermal(fuelwood, plan);
-            }
-        } catch (RuntimeException failure) {
-            mekanism.common.Mekanism.logger.error("Could not register Cloudworks fuelwood heater", failure);
-        }
+        CloudworksThermalPlan fuelwoodPlan =
+                CloudworksThermalContracts.fuelwood();
+        CloudworksAPI.registerMachine(new CloudworksMachineDefinition(fuelwood, new MachineExecutionProfile(1, 0, 0, 1, MachineUpgradePolicy.NONE),
+                new MachineSlotLayout()
+                        .add("item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64)
+                        .add("item_output", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 64),
+                MachineIdentityPolicy.none(), Collections.emptyList(), null, fuelwoodPlan));
     }
 
-    static mekanism.cloudworks.api.CloudworksThermalPlan evaporationThermalPlan() {
-        return mekanism.cloudworks.common.integration.CloudworksThermalContracts.evaporation()
+    static CloudworksThermalPlan evaporationThermalPlan() {
+        return CloudworksThermalContracts.evaporation()
                 .withEnvironment(0, 0, 4);
     }
 
-    private static void register(ItemStack machine, java.util.Map recipes, int ticks, MachineSlotLayout layout) {
-        CloudworksRegistries.registerMachine(machine, new MachineExecutionProfile(1, 50D, ticks), layout,
-                Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(machine), new CloudworksBasicItemRecipeAdapter(recipes));
+    private static void register(ItemStack machine, Map recipes, int ticks, MachineSlotLayout layout) {
+        CloudworksAPI.registerMachine(machine, new MachineExecutionProfile(1, 50D, ticks), layout,
+                new CloudworksBasicItemRecipeAdapter(recipes), MachineIdentityPolicy.none());
     }
 
-    private static void registerGas(ItemStack machine, java.util.Map recipes, int ticks, MachineSlotLayout layout) {
-        CloudworksRegistries.registerMachine(machine, new MachineExecutionProfile(1, 200D, ticks), layout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(machine), new CloudworksAdvancedGasItemRecipeAdapter(recipes));
+    private static void registerGas(ItemStack machine, Map recipes, int ticks, MachineSlotLayout layout) {
+        CloudworksAPI.registerMachine(machine, new MachineExecutionProfile(1, 200D, ticks), layout,
+                new CloudworksAdvancedGasItemRecipeAdapter(recipes), MachineIdentityPolicy.none());
     }
 
-    private static void registerDouble(ItemStack machine, java.util.Map recipes, int ticks, MachineSlotLayout layout) {
-        CloudworksRegistries.registerMachine(machine, new MachineExecutionProfile(1, 50D, ticks), withExtraItemInput(layout), Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(machine), new CloudworksDoubleItemRecipeAdapter(recipes));
+    private static void registerDouble(ItemStack machine, Map recipes, int ticks, MachineSlotLayout layout) {
+        CloudworksAPI.registerMachine(machine, new MachineExecutionProfile(1, 50D, ticks), withExtraItemInput(layout),
+                new CloudworksDoubleItemRecipeAdapter(recipes), MachineIdentityPolicy.none());
     }
 
-    private static void registerGasOutput(ItemStack machine, java.util.Map recipes, int ticks, MachineSlotLayout layout) {
-        MachineSlotLayout outputLayout = new MachineSlotLayout()
-                .add("item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64)
-                .add("gas_output", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 1000);
-        CloudworksRegistries.registerMachine(machine, new MachineExecutionProfile(1, 200D, ticks), outputLayout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(machine), new CloudworksItemGasOutputRecipeAdapter(recipes));
+    private static void registerGasOutput(ItemStack machine, Map recipes, int ticks, MachineSlotLayout layout) {
+        CloudworksAPI.registerMachine(machine, new MachineExecutionProfile(1, 200D, ticks), layout,
+                new CloudworksItemGasOutputRecipeAdapter(recipes), MachineIdentityPolicy.none());
     }
 
-    private static void registerChance(ItemStack machine, java.util.Map recipes, int ticks, MachineSlotLayout layout) {
-        CloudworksRegistries.registerMachine(machine, new MachineExecutionProfile(1, 50D, ticks), layout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(machine), new CloudworksChanceItemRecipeAdapter(recipes));
+    private static void registerChance(ItemStack machine, Map recipes, int ticks, MachineSlotLayout layout) {
+        CloudworksAPI.registerMachine(machine, new MachineExecutionProfile(1, 50D, ticks), chanceItemLayout(layout),
+                new CloudworksChanceItemRecipeAdapter(recipes), MachineIdentityPolicy.none());
+    }
+
+    private static MachineSlotLayout chanceItemLayout(MachineSlotLayout layout) {
+        MachineSlotLayout result = new MachineSlotLayout();
+        for (MachineSlotLayout.Slot slot : layout.slots())
+            result.add(slot.id(), slot.codecId(), slot.role(), slot.id().equals("item_output")
+                            ? Math.multiplyExact(slot.capacity(), 2) : slot.capacity(),
+                    slot.multipleConnections(), slot.recipeFilteredInput());
+        return result;
     }
 
     static void registerAdditionalItemMachines(MachineSlotLayout layout) {
@@ -286,240 +276,140 @@ public final class CloudworksMekanismBuiltins {
         registerNativeItemMachine(MachineType.ALLOY, RecipeHandler.Recipe.ALLOY.get(), layout, true);
     }
 
-    private static void registerNativeItemMachine(MachineType type, java.util.Map recipes,
+    private static void registerNativeItemMachine(MachineType type, Map recipes,
             MachineSlotLayout layout, boolean extraInput) {
         ItemStack machine = type.getStack();
-        CloudworksRegistries.registerMachine(machine,
+        CloudworksAPI.registerMachine(machine,
                 new MachineExecutionProfile(1, type.getUsage(), type.getStorage(), 200),
-                extraInput ? withExtraItemInput(layout) : layout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(machine), extraInput
-                ? new CloudworksDoubleItemRecipeAdapter(recipes) : new CloudworksBasicItemRecipeAdapter(recipes));
+                extraInput ? withExtraItemInput(layout) : layout, extraInput
+                ? new CloudworksDoubleItemRecipeAdapter(recipes) : new CloudworksBasicItemRecipeAdapter(recipes), MachineIdentityPolicy.none());
     }
 
     static void registerFactoryModes(MachineSlotLayout layout) {
-        registerFactoryMode(5, 3, RecipeType.SMELTING, RecipeHandler.Recipe.ENERGIZED_SMELTER.get(), layout);
-        registerFactoryMode(5, 3, RecipeType.ENRICHING, RecipeHandler.Recipe.ENRICHMENT_CHAMBER.get(), layout);
-        registerFactoryMode(5, 3, RecipeType.CRUSHING, RecipeHandler.Recipe.CRUSHER.get(), layout);
-        registerFactoryMode(6, 5, RecipeType.SMELTING, RecipeHandler.Recipe.ENERGIZED_SMELTER.get(), layout);
-        registerFactoryMode(7, 7, RecipeType.SMELTING, RecipeHandler.Recipe.ENERGIZED_SMELTER.get(), layout);
-        registerFactoryMode(8, 9, RecipeType.SMELTING, RecipeHandler.Recipe.ENERGIZED_SMELTER.get(), layout);
-        registerFactoryMode(6, 5, RecipeType.ENRICHING, RecipeHandler.Recipe.ENRICHMENT_CHAMBER.get(), layout);
-        registerFactoryMode(7, 7, RecipeType.ENRICHING, RecipeHandler.Recipe.ENRICHMENT_CHAMBER.get(), layout);
-        registerFactoryMode(8, 9, RecipeType.ENRICHING, RecipeHandler.Recipe.ENRICHMENT_CHAMBER.get(), layout);
-        registerFactoryMode(6, 5, RecipeType.CRUSHING, RecipeHandler.Recipe.CRUSHER.get(), layout);
-        registerFactoryMode(7, 7, RecipeType.CRUSHING, RecipeHandler.Recipe.CRUSHER.get(), layout);
-        registerFactoryMode(8, 9, RecipeType.CRUSHING, RecipeHandler.Recipe.CRUSHER.get(), layout);
+        registerFactoryFamily(RecipeType.SMELTING, layout,
+                new CloudworksBasicItemRecipeAdapter(RecipeHandler.Recipe.ENERGIZED_SMELTER.get()));
+        registerFactoryFamily(RecipeType.ENRICHING, layout,
+                new CloudworksBasicItemRecipeAdapter(RecipeHandler.Recipe.ENRICHMENT_CHAMBER.get()));
+        registerFactoryFamily(RecipeType.CRUSHING, layout,
+                new CloudworksBasicItemRecipeAdapter(RecipeHandler.Recipe.CRUSHER.get()));
+
         MachineSlotLayout factoryGasLayout = new MachineSlotLayout()
                 .add("item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64)
-                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
+                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 10000)
                 .add("item_output", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 64);
         MachineSlotLayout factoryInfuseLayout = new MachineSlotLayout()
                 .add("item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64)
                 .add("infuse_item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64)
                 .add("infuse_input", CloudworksInfuseResourceCodec.ID, MachineSlotLayout.PortRole.INPUT, 1000)
                 .add("item_output", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 64);
-        registerFactoryInfuserMode(5, 3, RecipeType.INFUSING, RecipeHandler.Recipe.METALLURGIC_INFUSER.get(), factoryInfuseLayout);
-        registerFactoryInfuserMode(6, 5, RecipeType.INFUSING, RecipeHandler.Recipe.METALLURGIC_INFUSER.get(), factoryInfuseLayout);
-        registerFactoryInfuserMode(7, 7, RecipeType.INFUSING, RecipeHandler.Recipe.METALLURGIC_INFUSER.get(), factoryInfuseLayout);
-        registerFactoryInfuserMode(8, 9, RecipeType.INFUSING, RecipeHandler.Recipe.METALLURGIC_INFUSER.get(), factoryInfuseLayout);
-        registerFactoryGasMode(5, 3, RecipeType.PURIFYING, RecipeHandler.Recipe.PURIFICATION_CHAMBER.get(), factoryGasLayout);
-        registerFactoryGasMode(6, 5, RecipeType.PURIFYING, RecipeHandler.Recipe.PURIFICATION_CHAMBER.get(), factoryGasLayout);
-        registerFactoryGasMode(7, 7, RecipeType.PURIFYING, RecipeHandler.Recipe.PURIFICATION_CHAMBER.get(), factoryGasLayout);
-        registerFactoryGasMode(8, 9, RecipeType.PURIFYING, RecipeHandler.Recipe.PURIFICATION_CHAMBER.get(), factoryGasLayout);
-        registerFactoryGasMode(5, 3, RecipeType.INJECTING, RecipeHandler.Recipe.CHEMICAL_INJECTION_CHAMBER.get(), factoryGasLayout);
-        registerFactoryGasMode(6, 5, RecipeType.INJECTING, RecipeHandler.Recipe.CHEMICAL_INJECTION_CHAMBER.get(), factoryGasLayout);
-        registerFactoryGasMode(7, 7, RecipeType.INJECTING, RecipeHandler.Recipe.CHEMICAL_INJECTION_CHAMBER.get(), factoryGasLayout);
-        registerFactoryGasMode(8, 9, RecipeType.INJECTING, RecipeHandler.Recipe.CHEMICAL_INJECTION_CHAMBER.get(), factoryGasLayout);
-        registerFactoryDoubleMode(5, 3, RecipeType.COMBINING, RecipeHandler.Recipe.COMBINER.get(), layout);
-        registerFactoryDoubleMode(6, 5, RecipeType.COMBINING, RecipeHandler.Recipe.COMBINER.get(), layout);
-        registerFactoryDoubleMode(7, 7, RecipeType.COMBINING, RecipeHandler.Recipe.COMBINER.get(), layout);
-        registerFactoryDoubleMode(8, 9, RecipeType.COMBINING, RecipeHandler.Recipe.COMBINER.get(), layout);
-        registerFactoryDoubleMode(5, 3, RecipeType.AllOY, RecipeHandler.Recipe.ALLOY.get(), layout);
-        registerFactoryDoubleMode(6, 5, RecipeType.AllOY, RecipeHandler.Recipe.ALLOY.get(), layout);
-        registerFactoryDoubleMode(7, 7, RecipeType.AllOY, RecipeHandler.Recipe.ALLOY.get(), layout);
-        registerFactoryDoubleMode(8, 9, RecipeType.AllOY, RecipeHandler.Recipe.ALLOY.get(), layout);
-        registerFactoryAdvancedMode(5, 3, RecipeType.COMPRESSING, RecipeHandler.Recipe.OSMIUM_COMPRESSOR.get(), factoryGasLayout);
-        registerFactoryAdvancedMode(6, 5, RecipeType.COMPRESSING, RecipeHandler.Recipe.OSMIUM_COMPRESSOR.get(), factoryGasLayout);
-        registerFactoryAdvancedMode(7, 7, RecipeType.COMPRESSING, RecipeHandler.Recipe.OSMIUM_COMPRESSOR.get(), factoryGasLayout);
-        registerFactoryAdvancedMode(8, 9, RecipeType.COMPRESSING, RecipeHandler.Recipe.OSMIUM_COMPRESSOR.get(), factoryGasLayout);
-        registerFactoryChanceMode(5, 3, RecipeType.SAWING, RecipeHandler.Recipe.PRECISION_SAWMILL.get(), layout);
-        registerFactoryChanceMode(6, 5, RecipeType.SAWING, RecipeHandler.Recipe.PRECISION_SAWMILL.get(), layout);
-        registerFactoryChanceMode(7, 7, RecipeType.SAWING, RecipeHandler.Recipe.PRECISION_SAWMILL.get(), layout);
-        registerFactoryChanceMode(8, 9, RecipeType.SAWING, RecipeHandler.Recipe.PRECISION_SAWMILL.get(), layout);
-        registerFactoryChanceMode(5, 3, RecipeType.EXTRACTOR, RecipeHandler.Recipe.CELL_EXTRACTOR.get(), layout);
-        registerFactoryChanceMode(6, 5, RecipeType.EXTRACTOR, RecipeHandler.Recipe.CELL_EXTRACTOR.get(), layout);
-        registerFactoryChanceMode(7, 7, RecipeType.EXTRACTOR, RecipeHandler.Recipe.CELL_EXTRACTOR.get(), layout);
-        registerFactoryChanceMode(8, 9, RecipeType.EXTRACTOR, RecipeHandler.Recipe.CELL_EXTRACTOR.get(), layout);
-        registerFactoryChanceMode(5, 3, RecipeType.SEPARATOR, RecipeHandler.Recipe.CELL_SEPARATOR.get(), layout);
-        registerFactoryChanceMode(6, 5, RecipeType.SEPARATOR, RecipeHandler.Recipe.CELL_SEPARATOR.get(), layout);
-        registerFactoryChanceMode(7, 7, RecipeType.SEPARATOR, RecipeHandler.Recipe.CELL_SEPARATOR.get(), layout);
-        registerFactoryChanceMode(8, 9, RecipeType.SEPARATOR, RecipeHandler.Recipe.CELL_SEPARATOR.get(), layout);
-        registerFactoryChance2Mode(5, 3, RecipeType.RECYCLER, RecipeHandler.Recipe.RECYCLER.get(), layout);
-        registerFactoryChance2Mode(6, 5, RecipeType.RECYCLER, RecipeHandler.Recipe.RECYCLER.get(), layout);
-        registerFactoryChance2Mode(7, 7, RecipeType.RECYCLER, RecipeHandler.Recipe.RECYCLER.get(), layout);
-        registerFactoryChance2Mode(8, 9, RecipeType.RECYCLER, RecipeHandler.Recipe.RECYCLER.get(), layout);
-        registerFactoryMode(5, 3, RecipeType.STAMPING, RecipeHandler.Recipe.STAMPING.get(), layout);
-        registerFactoryMode(6, 5, RecipeType.STAMPING, RecipeHandler.Recipe.STAMPING.get(), layout);
-        registerFactoryMode(7, 7, RecipeType.STAMPING, RecipeHandler.Recipe.STAMPING.get(), layout);
-        registerFactoryMode(8, 9, RecipeType.STAMPING, RecipeHandler.Recipe.STAMPING.get(), layout);
-        registerFactoryMode(5, 3, RecipeType.ROLLING, RecipeHandler.Recipe.ROLLING.get(), layout);
-        registerFactoryMode(6, 5, RecipeType.ROLLING, RecipeHandler.Recipe.ROLLING.get(), layout);
-        registerFactoryMode(7, 7, RecipeType.ROLLING, RecipeHandler.Recipe.ROLLING.get(), layout);
-        registerFactoryMode(8, 9, RecipeType.ROLLING, RecipeHandler.Recipe.ROLLING.get(), layout);
-        registerFactoryMode(5, 3, RecipeType.BRUSHED, RecipeHandler.Recipe.BRUSHED.get(), layout);
-        registerFactoryMode(6, 5, RecipeType.BRUSHED, RecipeHandler.Recipe.BRUSHED.get(), layout);
-        registerFactoryMode(7, 7, RecipeType.BRUSHED, RecipeHandler.Recipe.BRUSHED.get(), layout);
-        registerFactoryMode(8, 9, RecipeType.BRUSHED, RecipeHandler.Recipe.BRUSHED.get(), layout);
-        registerFactoryMode(5, 3, RecipeType.TURNING, RecipeHandler.Recipe.TURNING.get(), layout);
-        registerFactoryMode(6, 5, RecipeType.TURNING, RecipeHandler.Recipe.TURNING.get(), layout);
-        registerFactoryMode(7, 7, RecipeType.TURNING, RecipeHandler.Recipe.TURNING.get(), layout);
-        registerFactoryMode(8, 9, RecipeType.TURNING, RecipeHandler.Recipe.TURNING.get(), layout);
+
+        registerFactoryFamily(RecipeType.INFUSING, factoryInfuseLayout,
+                new CloudworksInfuserRecipeAdapter(RecipeHandler.Recipe.METALLURGIC_INFUSER.get()));
+        registerFactoryFamily(RecipeType.PURIFYING, factoryGasLayout,
+                new CloudworksAdvancedGasItemRecipeAdapter(RecipeHandler.Recipe.PURIFICATION_CHAMBER.get()));
+        registerFactoryFamily(RecipeType.INJECTING, factoryGasLayout,
+                new CloudworksAdvancedGasItemRecipeAdapter(RecipeHandler.Recipe.CHEMICAL_INJECTION_CHAMBER.get()));
+        registerFactoryFamily(RecipeType.COMBINING, withExtraItemInput(layout),
+                new CloudworksDoubleItemRecipeAdapter(RecipeHandler.Recipe.COMBINER.get()));
+        registerFactoryFamily(RecipeType.AllOY, withExtraItemInput(layout),
+                new CloudworksDoubleItemRecipeAdapter(RecipeHandler.Recipe.ALLOY.get()));
+        registerFactoryFamily(RecipeType.COMPRESSING, factoryGasLayout,
+                new CloudworksAdvancedGasItemRecipeAdapter(RecipeHandler.Recipe.OSMIUM_COMPRESSOR.get()));
+        registerFactoryFamily(RecipeType.SAWING, layout,
+                new CloudworksChanceItemRecipeAdapter(RecipeHandler.Recipe.PRECISION_SAWMILL.get()));
+        registerFactoryFamily(RecipeType.EXTRACTOR, layout,
+                new CloudworksChanceItemRecipeAdapter(RecipeHandler.Recipe.CELL_EXTRACTOR.get()));
+        registerFactoryFamily(RecipeType.SEPARATOR, layout,
+                new CloudworksChanceItemRecipeAdapter(RecipeHandler.Recipe.CELL_SEPARATOR.get()));
+        registerFactoryFamily(RecipeType.RECYCLER, layout,
+                new CloudworksChance2ItemRecipeAdapter(RecipeHandler.Recipe.RECYCLER.get(), true));
+        registerFactoryFamily(RecipeType.STAMPING, layout,
+                new CloudworksBasicItemRecipeAdapter(RecipeHandler.Recipe.STAMPING.get()));
+        registerFactoryFamily(RecipeType.ROLLING, layout,
+                new CloudworksBasicItemRecipeAdapter(RecipeHandler.Recipe.ROLLING.get()));
+        registerFactoryFamily(RecipeType.BRUSHED, layout,
+                new CloudworksBasicItemRecipeAdapter(RecipeHandler.Recipe.BRUSHED.get()));
+        registerFactoryFamily(RecipeType.TURNING, layout,
+                new CloudworksBasicItemRecipeAdapter(RecipeHandler.Recipe.TURNING.get()));
+
         MachineSlotLayout prcLayout = new MachineSlotLayout()
                 .add("item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64)
-                .add("fluid_input", QIOResourceCodecs.FLUID_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
-                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
+                .add("fluid_input", QIOResourceCodecs.FLUID_STACK_ID, MachineSlotLayout.PortRole.INPUT, 10000)
+                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 10000)
                 .add("item_output", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 64)
-                .add("gas_output", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 1000);
-        registerFactoryPressurizedMode(5, 3, RecipeType.PRC, RecipeHandler.Recipe.PRESSURIZED_REACTION_CHAMBER.get(), prcLayout);
-        registerFactoryPressurizedMode(6, 5, RecipeType.PRC, RecipeHandler.Recipe.PRESSURIZED_REACTION_CHAMBER.get(), prcLayout);
-        registerFactoryPressurizedMode(7, 7, RecipeType.PRC, RecipeHandler.Recipe.PRESSURIZED_REACTION_CHAMBER.get(), prcLayout);
-        registerFactoryPressurizedMode(8, 9, RecipeType.PRC, RecipeHandler.Recipe.PRESSURIZED_REACTION_CHAMBER.get(), prcLayout);
-        registerFactoryNucleosynthesizerMode(5, 3);
-        registerFactoryNucleosynthesizerMode(6, 5);
-        registerFactoryNucleosynthesizerMode(7, 7);
-        registerFactoryNucleosynthesizerMode(8, 9);
+                .add("gas_output", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 10000);
+        registerFactoryFamily(RecipeType.PRC, prcLayout,
+                new CloudworksPressurizedRecipeAdapter(RecipeHandler.Recipe.PRESSURIZED_REACTION_CHAMBER.get()));
+        MachineSlotLayout nucleosynthLayout = new MachineSlotLayout()
+                .add("item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64)
+                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 10000)
+                .add("item_output", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 64);
+        registerFactoryFamily(RecipeType.NUCLEOSYNTHESIZER, nucleosynthLayout,
+                new CloudworksNucleosynthesizerRecipeAdapter(
+                        RecipeHandler.Recipe.ANTIPROTONIC_NUCLEOSYNTHESIZER.get()));
     }
 
-    private static void registerFactoryMode(int metadata, int threads, RecipeType type, java.util.Map recipes, MachineSlotLayout layout) {
-        ItemStack machine = factoryStack(metadata, type);
-        CloudworksRegistries.registerMachine(machine, factoryProfile(threads, type), layout, Collections.emptyList(), MachineIdentityPolicy.keys("recipeTypeName", "recipeType", "recipeTypeVersion"));
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(machine), new CloudworksBasicItemRecipeAdapter(recipes));
+    private static void registerFactoryFamily(RecipeType type, MachineSlotLayout layout,
+                                              CloudworksMachineAdapter adapter) {
+        if (type == RecipeType.SAWING || type == RecipeType.EXTRACTOR || type == RecipeType.SEPARATOR)
+            layout = chanceItemLayout(layout);
+        for (FactoryTier tier : FactoryTier.values()) {
+            ItemStack machine = MekanismUtils.getFactory(tier, type);
+            CloudworksAPI.registerMachine(machine, factoryProfile(tier, type),
+                    scaleFactoryLayout(layout, tier.processes), adapter, FACTORY_IDENTITY);
+            if (type == RecipeType.PURIFYING || type == RecipeType.INJECTING)
+                CloudworksAPI.acceptMachineUpgrade(machine, mekanism.cloudworks.common.integration.CloudworksGasUpgrade.type(),
+                        mekanism.common.Upgrade.GAS.getMaxInstalled());
+        }
     }
 
-    private static void registerFactoryGasMode(int metadata, int threads, RecipeType type, java.util.Map recipes, MachineSlotLayout layout) {
-        ItemStack machine = factoryStack(metadata, type);
-        CloudworksRegistries.registerMachine(machine, factoryProfile(threads, type), layout, Collections.emptyList(), MachineIdentityPolicy.keys("recipeTypeName", "recipeType", "recipeTypeVersion"));
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(machine), new CloudworksAdvancedGasItemRecipeAdapter(recipes));
-    }
-
-    private static void registerFactoryDoubleMode(int metadata, int threads, RecipeType type, java.util.Map recipes, MachineSlotLayout layout) {
-        ItemStack machine = factoryStack(metadata, type);
-        CloudworksRegistries.registerMachine(machine, factoryProfile(threads, type), withExtraItemInput(layout), Collections.emptyList(), MachineIdentityPolicy.keys("recipeTypeName", "recipeType", "recipeTypeVersion"));
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(machine), new CloudworksDoubleItemRecipeAdapter(recipes));
+    private static MachineSlotLayout scaleFactoryLayout(MachineSlotLayout layout, int processes) {
+        MachineSlotLayout scaled = new MachineSlotLayout();
+        for (MachineSlotLayout.Slot slot : layout.slots()) {
+            // Infusion material shares one physical conversion slot at every tier.
+            scaled.add(slot.id(), slot.codecId(), slot.role(),
+                    slot.id().equals("infuse_item_input") ? slot.capacity() : Math.multiplyExact(slot.capacity(), processes),
+                    slot.multipleConnections(), slot.recipeFilteredInput());
+        }
+        return scaled;
     }
 
     private static MachineSlotLayout withExtraItemInput(MachineSlotLayout layout) {
         MachineSlotLayout result = new MachineSlotLayout();
         for (MachineSlotLayout.Slot slot : layout.slots()) {
-            result.add(slot.id(), slot.codecId(), slot.role(), slot.capacity(), slot.multipleConnections());
+            result.add(slot.id(), slot.codecId(), slot.role(), slot.capacity(), slot.multipleConnections(), slot.recipeFilteredInput());
             if (slot.id().equals("item_input"))
                 result.add("extra_item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64);
         }
         return result;
     }
 
-    private static void registerPressurized(ItemStack machine, java.util.Map recipes, int ticks, MachineSlotLayout layout) {
-        CloudworksRegistries.registerMachine(machine, new MachineExecutionProfile(1, 200D, ticks), layout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(machine), new CloudworksPressurizedRecipeAdapter(recipes));
+    private static void registerPressurized(ItemStack machine, Map recipes, int ticks, MachineSlotLayout layout) {
+        CloudworksAPI.registerMachine(machine, new MachineExecutionProfile(1, 200D, ticks), layout,
+                new CloudworksPressurizedRecipeAdapter(recipes), MachineIdentityPolicy.none());
     }
 
-    private static void registerInfuser(ItemStack machine, java.util.Map recipes, int ticks, MachineSlotLayout layout) {
-        CloudworksRegistries.registerMachine(machine, new MachineExecutionProfile(1, 50D, ticks), layout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(machine), new CloudworksInfuserRecipeAdapter(recipes));
+    private static void registerInfuser(ItemStack machine, Map recipes, int ticks, MachineSlotLayout layout) {
+        CloudworksAPI.registerMachine(machine, new MachineExecutionProfile(1, 50D, ticks), layout,
+                new CloudworksInfuserRecipeAdapter(recipes), MachineIdentityPolicy.none());
     }
 
-    private static void registerAmbient(ItemStack machine, java.util.Map recipes, int ticks, MachineSlotLayout layout) {
-        CloudworksRegistries.registerMachine(machine, new MachineExecutionProfile(1, 50D, ticks), layout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(machine), new CloudworksAmbientGasRecipeAdapter(recipes));
+    private static void registerAmbient(ItemStack machine, Map recipes, double energyPerTick,
+            MachineSlotLayout layout, MachineUpgradePolicy policy) {
+        CloudworksAPI.registerMachine(machine, new MachineExecutionProfile(1, energyPerTick, energyPerTick * 10D, 1)
+                .withUpgradePolicy(policy),
+                layout, new CloudworksAmbientGasRecipeAdapter(recipes), MachineIdentityPolicy.none());
     }
 
-    private static void registerGasGeneratorIfPresent() {
-        if (!net.minecraftforge.fml.common.Loader.isModLoaded("mekanismgenerators")) return;
-        try {
-            Class<?> blocksClass = Class.forName("mekanism.generators.common.GeneratorsBlocks");
-            net.minecraft.block.Block generator = (net.minecraft.block.Block) blocksClass.getField("Generator").get(null);
-            ItemStack machine = new ItemStack(generator, 1, 3);
-            MachineSlotLayout layout = new MachineSlotLayout()
-                    .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 18000);
-            CloudworksGasGeneratorAdapter adapter = new CloudworksGasGeneratorAdapter(RecipeHandler.Recipe.GAS_FUEL_TO_ENERGY_RECIPE.get());
-            CloudworksRegistries.registerMachine(machine, new MachineExecutionProfile(1, 0D, 100000D, 1), layout, Collections.emptyList());
-            CloudworksRegistries.registerSpecial(machine, adapter);
-            CloudworksRegistries.registerEnergyGenerator(machine, adapter);
-        } catch (ReflectiveOperationException | RuntimeException ignored) {
-            // Generators is optional; its absence or incomplete registry must not
-            // prevent the core Cloudworks module from loading.
-        }
+    private static MachineExecutionProfile factoryProfile(FactoryTier tier, RecipeType type) {
+        double storageFactor = type == RecipeType.PRC || type == RecipeType.NUCLEOSYNTHESIZER ? 1D : 0.5D;
+        return new MachineExecutionProfile(tier.processes, type.getEnergyUsage(),
+                tier.processes * Math.max(storageFactor * type.getEnergyStorage(), type.getEnergyUsage()),
+                factoryTicks(type));
     }
 
-
-    private static void registerFactoryAdvancedMode(int metadata, int threads, RecipeType type, java.util.Map recipes, MachineSlotLayout layout) {
-        ItemStack machine = factoryStack(metadata, type);
-        CloudworksRegistries.registerMachine(machine, factoryProfile(threads, type), layout,
-                Collections.emptyList(), MachineIdentityPolicy.keys("recipeTypeName", "recipeType", "recipeTypeVersion"));
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(machine), new CloudworksAdvancedGasItemRecipeAdapter(recipes));
-    }
-
-    private static void registerFactoryChanceMode(int metadata, int threads, RecipeType type, java.util.Map recipes, MachineSlotLayout layout) {
-        ItemStack machine = factoryStack(metadata, type);
-        CloudworksRegistries.registerMachine(machine, factoryProfile(threads, type), layout,
-                Collections.emptyList(), MachineIdentityPolicy.keys("recipeTypeName", "recipeType", "recipeTypeVersion"));
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(machine), new CloudworksChanceItemRecipeAdapter(recipes));
-    }
-
-    private static void registerFactoryPressurizedMode(int metadata, int threads, RecipeType type, java.util.Map recipes, MachineSlotLayout layout) {
-        ItemStack machine = factoryStack(metadata, type);
-        CloudworksRegistries.registerMachine(machine, factoryProfile(threads, type), layout,
-                Collections.emptyList(), MachineIdentityPolicy.keys("recipeTypeName", "recipeType", "recipeTypeVersion"));
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(machine), new CloudworksPressurizedRecipeAdapter(recipes));
-    }
-
-    private static void registerFactoryInfuserMode(int metadata, int threads, RecipeType type, java.util.Map recipes, MachineSlotLayout layout) {
-        ItemStack machine = factoryStack(metadata, type);
-        CloudworksRegistries.registerMachine(machine, factoryProfile(threads, type), layout,
-                Collections.emptyList(), MachineIdentityPolicy.keys("recipeTypeName", "recipeType", "recipeTypeVersion"));
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(machine), new CloudworksInfuserRecipeAdapter(recipes));
-    }
-
-    private static void registerFactoryChance2Mode(int metadata, int threads, RecipeType type, java.util.Map recipes, MachineSlotLayout layout) {
-        ItemStack machine = factoryStack(metadata, type);
-        CloudworksRegistries.registerMachine(machine, factoryProfile(threads, type), layout,
-                Collections.emptyList(), MachineIdentityPolicy.keys("recipeTypeName", "recipeType", "recipeTypeVersion"));
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(machine), new CloudworksChance2ItemRecipeAdapter(recipes));
-    }
-
-    private static void registerFactoryNucleosynthesizerMode(int metadata, int threads) {
-        ItemStack machine = factoryStack(metadata, RecipeType.NUCLEOSYNTHESIZER);
-        MachineSlotLayout nucleosynthLayout = new MachineSlotLayout()
-                .add("item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, 64)
-                .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, 1000)
-                .add("item_output", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, 64);
-        CloudworksRegistries.registerMachine(machine, factoryProfile(threads, RecipeType.NUCLEOSYNTHESIZER),
-                nucleosynthLayout, Collections.emptyList(),
-                MachineIdentityPolicy.keys("recipeTypeName", "recipeType", "recipeTypeVersion"));
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(machine),
-                new CloudworksNucleosynthesizerRecipeAdapter(RecipeHandler.Recipe.ANTIPROTONIC_NUCLEOSYNTHESIZER.get()));
-    }
-
-    private static ItemStack factoryStack(int metadata, RecipeType type) {
-        mekanism.common.block.states.BlockStateMachine.MachineType machineType = factoryMachineType(metadata);
-        ItemStack machine = new ItemStack(machineType.typeBlock.getBlock(), 1, machineType.meta);
-        net.minecraft.nbt.NBTTagCompound data = new net.minecraft.nbt.NBTTagCompound();
-        FactoryRecipeTypeCodec.write(data, type);
-        machine.setTagCompound(data);
-        return machine;
-    }
-
-    static mekanism.common.block.states.BlockStateMachine.MachineType factoryMachineType(int legacyTier) {
-        return switch (legacyTier) {
-            case 5 -> mekanism.common.block.states.BlockStateMachine.MachineType.BASIC_FACTORY;
-            case 6 -> mekanism.common.block.states.BlockStateMachine.MachineType.ADVANCED_FACTORY;
-            case 7 -> mekanism.common.block.states.BlockStateMachine.MachineType.ELITE_FACTORY;
-            case 8 -> mekanism.common.block.states.BlockStateMachine.MachineType.ULTIMATE_FACTORY;
-            default -> throw new IllegalArgumentException("Unknown built-in factory tier");
-        };
-    }
-
-    private static MachineExecutionProfile factoryProfile(int threads, RecipeType type) {
-        return new MachineExecutionProfile(threads, type.getEnergyUsage(), threads * type.getEnergyStorage(), 200);
+    /** Native base ticks per factory family: PRC and the nucleosynthesizer run 100, every other family 200. */
+    private static int factoryTicks(RecipeType type) {
+        return type == RecipeType.PRC || type == RecipeType.NUCLEOSYNTHESIZER ? 100 : 200;
     }
 }

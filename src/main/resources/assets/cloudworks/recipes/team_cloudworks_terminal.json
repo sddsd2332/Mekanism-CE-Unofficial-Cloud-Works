@@ -1,0 +1,14 @@
+{
+  "type": "forge:ore_shaped",
+  "pattern": [
+    "AAA",
+    "A#A",
+    "ATA"
+  ],
+  "key": {
+    "A": { "item": "mekanism:hdpe_pellet" },
+    "#": { "item": "cloudworks:team_cloud_input" },
+    "T": { "item": "mekanism:teleportationcore" }
+  },
+  "result": { "item": "cloudworks:team_cloudworks_terminal" }
+}

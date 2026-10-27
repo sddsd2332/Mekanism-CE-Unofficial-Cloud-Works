@@ -27,6 +27,9 @@ import net.minecraftforge.fml.relauncher.SideOnly;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import mekanism.api.gas.GasStack;
+import mekanism.cloudworks.common.content.CloudworksHybridTank;
+import mekanism.common.inventory.container.SelectedWindowData;
 
 /**
  * Upload-port main screen (协议储存箱): two dynamic buffer previews (items, hybrid
@@ -103,9 +106,9 @@ public class GuiCloudInputPort extends GuiConfigurableTile<TileEntityCloudInput,
 
     private List<MachineResourceStack> getDisplayedTanks() {
         List<MachineResourceStack> resources = new ArrayList<>();
-        for (mekanism.cloudworks.common.content.CloudworksHybridTank tank : tileEntity.portTanks()) {
+        for (CloudworksHybridTank tank : tileEntity.portTanks()) {
             FluidStack fluid = tank.getFluid();
-            mekanism.api.gas.GasStack gas = tank.getGas();
+            GasStack gas = tank.getGas();
             if (fluid != null) mergeResource(resources, MachineResourceStack.fluid("port_tank", fluid, fluid.amount));
             else if (gas != null) mergeResource(resources, MachineResourceStack.gas("port_tank", gas, gas.amount));
         }
@@ -137,10 +140,10 @@ public class GuiCloudInputPort extends GuiConfigurableTile<TileEntityCloudInput,
     @Override
     protected void initPinnedWindows() {
         super.initPinnedWindows();
-        if (new mekanism.common.inventory.container.SelectedWindowData(CloudworksWindowTypes.PORT_ITEMS).wasPinned()) {
+        if (new SelectedWindowData(CloudworksWindowTypes.PORT_ITEMS).wasPinned()) {
             openItemsWindow();
         }
-        if (new mekanism.common.inventory.container.SelectedWindowData(CloudworksWindowTypes.PORT_TANKS).wasPinned()) {
+        if (new SelectedWindowData(CloudworksWindowTypes.PORT_TANKS).wasPinned()) {
             openTanksWindow();
         }
     }

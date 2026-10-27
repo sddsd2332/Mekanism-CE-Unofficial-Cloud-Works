@@ -6,6 +6,8 @@ import mekanism.common.tile.prefab.TileEntityContainerBlock;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.world.WorldServer;
 import net.minecraft.world.chunk.storage.AnvilChunkLoader;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.chunk.Chunk;
 
 /** Main-thread captures, one physical chunk write per tick, detached disk verification. */
 public final class CloudworksPhysicalCheckpointService {
@@ -55,10 +57,10 @@ public final class CloudworksPhysicalCheckpointService {
         for (Map.Entry<Key, List<Request>> group : requests.entrySet()) {
             Key key = group.getKey();
             try {
-                Map<net.minecraft.util.math.BlockPos, NBTTagCompound> latest = new LinkedHashMap<>();
+                Map<BlockPos, NBTTagCompound> latest = new LinkedHashMap<>();
                 for (Request request : group.getValue()) {
                     NBTTagCompound tile = request.tile;
-                    latest.put(new net.minecraft.util.math.BlockPos(tile.getInteger("x"),
+                    latest.put(new BlockPos(tile.getInteger("x"),
                             tile.getInteger("y"), tile.getInteger("z")), tile);
                 }
                 List<NBTTagCompound> expected = new ArrayList<>(latest.values());
@@ -79,7 +81,7 @@ public final class CloudworksPhysicalCheckpointService {
             List<NBTTagCompound> expected) throws Exception {
         if (!(world.getChunkProvider().chunkLoader instanceof AnvilChunkLoader loader))
             throw new IllegalStateException("Cloudworks requires verifiable Anvil saves");
-        net.minecraft.world.chunk.Chunk loaded = world.getChunkProvider().getLoadedChunk(x, z);
+        Chunk loaded = world.getChunkProvider().getLoadedChunk(x, z);
         if (loaded != null) loader.saveChunk(world, loaded);
         return CloudworksTerminalPersistence.confirmChunk(loader.chunkSaveLocation, x, z, expected);
     }

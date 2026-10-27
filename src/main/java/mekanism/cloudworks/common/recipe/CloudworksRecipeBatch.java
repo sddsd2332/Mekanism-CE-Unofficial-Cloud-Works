@@ -3,6 +3,9 @@ package mekanism.cloudworks.common.recipe;
 import mekanism.api.gas.GasStack;
 import mekanism.api.qio.resource.QIOResourceCodecs;
 import mekanism.api.qio.resource.QIOResourceDescriptor;
+import mekanism.cloudworks.api.CloudworksInfuseResourceCodec;
+import mekanism.cloudworks.api.recipe.CloudworksRecipeSpec;
+import mekanism.cloudworks.api.recipe.CloudworksResourceMatcher;
 import mekanism.cloudworks.common.data.CloudworksResourceStack;
 import mekanism.common.InfuseStorage;
 import mekanism.common.OreDictCache;
@@ -15,15 +18,22 @@ import net.minecraftforge.oredict.OreDictionary;
 import java.util.*;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+import net.minecraft.util.ResourceLocation;
 
 /**
  * Per-query native recipe requirements. This is not a second recipe registry.
  */
 public final class CloudworksRecipeBatch {
+    private boolean secondaryGasInputs;
+    private boolean secondaryFluidInputs;
+    public CloudworksRecipeBatch secondaryGasInputs() { secondaryGasInputs = true; return this; }
+    public CloudworksRecipeBatch secondaryFluidInputs() { secondaryFluidInputs = true; return this; }
     private final List<Input> inputs = new ArrayList<>();
     private final List<Input> configuration = new ArrayList<>();
     private final List<CloudworksResourceStack> outputs = new ArrayList<>();
     private final List<String> outputPorts = new ArrayList<>();
+    private final List<Boolean> scalableOutputs = new ArrayList<>();
+    private boolean outputMultiplierEnabled = true;
     private final List<ChanceOutput> chanceOutputs = new ArrayList<>();
     private final List<CloudworksResourceStack> choiceOutputs = new ArrayList<>();
     private boolean sunlightRequired;
@@ -56,7 +66,7 @@ public final class CloudworksRecipeBatch {
     }
 
     private static Predicate<QIOResourceDescriptor> exactMatcher(QIOResourceDescriptor captured) {
-        net.minecraft.util.ResourceLocation codec = captured.getCodecId();
+        ResourceLocation codec = captured.getCodecId();
         String family = captured.getFamily();
         int version = captured.getCodecVersion();
         NBTTagCompound payload = captured.getPayload();
@@ -167,6 +177,7 @@ public final class CloudworksRecipeBatch {
     public CloudworksRecipeBatch decay(long amount) {
         if (amount < 0) throw new IllegalArgumentException("Negative decay quantity");
         decayAmount = amount;
+        outputMultiplierEnabled = false;
         return this;
     }
 
@@ -189,6 +200,7 @@ public final class CloudworksRecipeBatch {
         if (!Double.isFinite(perOperation) || perOperation <= 0D)
             throw new IllegalArgumentException("Invalid fuel contract energy");
         this.energyPerOperation = perOperation;
+        outputMultiplierEnabled = false;
         return this;
     }
 
@@ -196,7 +208,8 @@ public final class CloudworksRecipeBatch {
         if (descriptor == null || !descriptor.isResolved() || amount <= 0)
             throw new IllegalArgumentException("Invalid exact resource ingredient");
         Predicate<QIOResourceDescriptor> matcher = exactMatcher(descriptor);
-        inputs.add(new Input(amount, matcher, () -> matcher, port, descriptor.getCodecId()));
+        inputs.add(new Input(amount, matcher, () -> matcher, port, descriptor.getCodecId(),
+                CloudworksResourceMatcher.exact(descriptor)));
         return this;
     }
 
@@ -204,7 +217,7 @@ public final class CloudworksRecipeBatch {
         if (alternatives == null || alternatives.isEmpty() || amount <= 0)
             throw new IllegalArgumentException("Empty resource alternatives");
         List<Predicate<QIOResourceDescriptor>> matchers = new ArrayList<>();
-        net.minecraft.util.ResourceLocation codec = alternatives.get(0).getCodecId();
+        ResourceLocation codec = alternatives.get(0).getCodecId();
         for (QIOResourceDescriptor descriptor : alternatives) {
             if (descriptor == null || !descriptor.isResolved()) throw new IllegalArgumentException("Unresolved resource");
             if (!codec.equals(descriptor.getCodecId()))
@@ -215,7 +228,16 @@ public final class CloudworksRecipeBatch {
             for (Predicate<QIOResourceDescriptor> alternative : matchers) if (alternative.test(candidate)) return true;
             return false;
         };
-        inputs.add(new Input(amount, matcher, () -> matcher, port, codec));
+        inputs.add(new Input(amount, matcher, () -> matcher, port, codec,
+                CloudworksResourceMatcher.alternatives(alternatives)));
+        return this;
+    }
+
+    public CloudworksRecipeBatch any(ResourceLocation codec, long amount, String port) {
+        if (codec == null || amount <= 0) throw new IllegalArgumentException("Invalid codec ingredient");
+        Predicate<QIOResourceDescriptor> matcher = descriptor -> codec.equals(descriptor.getCodecId());
+        inputs.add(new Input(amount, matcher, () -> matcher, port == null ? "" : port, codec,
+                CloudworksResourceMatcher.codec(codec)));
         return this;
     }
 
@@ -223,7 +245,40 @@ public final class CloudworksRecipeBatch {
         if (descriptor == null || !descriptor.isResolved())
             throw new IllegalArgumentException("Invalid resource template");
         Predicate<QIOResourceDescriptor> matcher = exactMatcher(descriptor);
-        configuration.add(new Input(1, matcher, () -> matcher, port, descriptor.getCodecId()));
+        configuration.add(new Input(1, matcher, () -> matcher, port, descriptor.getCodecId(),
+                CloudworksResourceMatcher.exact(descriptor)));
+        return this;
+    }
+
+    public CloudworksRecipeBatch templateResources(List<QIOResourceDescriptor> alternatives, String port) {
+        if (alternatives == null || alternatives.isEmpty())
+            throw new IllegalArgumentException("Empty configuration alternatives");
+        List<Predicate<QIOResourceDescriptor>> matchers = new ArrayList<>();
+        ResourceLocation codec = alternatives.get(0).getCodecId();
+        for (QIOResourceDescriptor descriptor : alternatives) {
+            if (descriptor == null || !descriptor.isResolved() || !codec.equals(descriptor.getCodecId()))
+                throw new IllegalArgumentException("Invalid configuration alternatives");
+            matchers.add(exactMatcher(descriptor));
+        }
+        Predicate<QIOResourceDescriptor> matcher = candidate -> {
+            if (!codec.equals(candidate.getCodecId())) return false;
+            for (Predicate<QIOResourceDescriptor> alternative : matchers)
+                if (alternative.test(candidate)) return true;
+            return false;
+        };
+        configuration.add(new Input(1, matcher, () -> matcher, port == null ? "" : port, codec,
+                CloudworksResourceMatcher.alternatives(alternatives)));
+        return this;
+    }
+
+    public CloudworksRecipeBatch chooseResourceOutput(List<QIOResourceDescriptor> candidates, long amount) {
+        if (!choiceOutputs.isEmpty() || candidates == null || candidates.isEmpty() || amount <= 0)
+            throw new IllegalArgumentException("Invalid exclusive output pool");
+        for (QIOResourceDescriptor candidate : candidates) {
+            if (candidate == null || !candidate.isResolved())
+                throw new IllegalArgumentException("Invalid exclusive output candidate");
+            choiceOutputs.add(new CloudworksResourceStack(candidate, amount));
+        }
         return this;
     }
 
@@ -234,11 +289,27 @@ public final class CloudworksRecipeBatch {
         return this;
     }
 
+    /** Returns and conserved conversions retain their native quantities even in a boosted cloud. */
+    public CloudworksRecipeBatch unscaledOutput(QIOResourceDescriptor descriptor, long amount, String port) {
+        output(descriptor, amount, port);
+        scalableOutputs.set(scalableOutputs.size() - 1, false);
+        return this;
+    }
+
+    public CloudworksRecipeBatch unscaledOutputs() {
+        outputMultiplierEnabled = false;
+        return this;
+    }
+
     public CloudworksRecipeBatch chanceOutput(QIOResourceDescriptor descriptor, long amount, double chance) {
+        return chanceOutput(descriptor, amount, chance, "");
+    }
+
+    public CloudworksRecipeBatch chanceOutput(QIOResourceDescriptor descriptor, long amount, double chance, String port) {
         if (descriptor == null || !descriptor.isResolved() || amount <= 0
                 || !Double.isFinite(chance) || chance < 0 || chance > 1)
             throw new IllegalArgumentException("Invalid resource chance output");
-        if (chance > 0) chanceOutputs.add(new ChanceOutput(descriptor, amount, chance));
+        if (chance > 0) chanceOutputs.add(new ChanceOutput(descriptor, amount, chance, port));
         return this;
     }
 
@@ -251,8 +322,83 @@ public final class CloudworksRecipeBatch {
         inputs.add(new Input(wanted.getCount(), descriptor -> {
             ItemStack actual = descriptor.resolveItemStackTemplate();
             return actual != null && !actual.isEmpty() && MachineInput.inputItemMatches(actual, wanted);
-                }, () -> frozenItemMatcher(wanted), port, QIOResourceCodecs.ITEM_STACK_ID));
+                }, () -> frozenItemMatcher(wanted), port, QIOResourceCodecs.ITEM_STACK_ID,
+                itemDeclaration(wanted)));
         return this;
+    }
+
+    /**
+     * Matches any non-empty item resource. This is intentionally a codec-only
+     * matcher so it can be frozen for the Runtime worker without consulting the
+     * item registry or invoking a mod-provided ingredient callback.
+     */
+    public CloudworksRecipeBatch anyItem() {
+        inputs.add(new Input(1,
+                descriptor -> {
+                    ItemStack actual = descriptor.resolveItemStackTemplate();
+                    return actual != null && !actual.isEmpty();
+                },
+                () -> descriptor -> QIOResourceCodecs.ITEM_STACK_ID.equals(descriptor.getCodecId()),
+                "", QIOResourceCodecs.ITEM_STACK_ID, CloudworksResourceMatcher.codec(QIOResourceCodecs.ITEM_STACK_ID)));
+        return this;
+    }
+
+    /**
+     * Matches any item except the owner-thread-frozen blacklist entries. The
+     * exclusions use the same item id/meta/tag semantics as the positive
+     * frozen matcher, including wildcard damage values.
+     */
+    public CloudworksRecipeBatch anyItemExcept(Collection<QIOResourceDescriptor> excluded) {
+        List<Predicate<QIOResourceDescriptor>> exclusions = new ArrayList<>();
+        if (excluded != null) for (QIOResourceDescriptor descriptor : excluded)
+            if (descriptor != null && QIOResourceCodecs.ITEM_STACK_ID.equals(descriptor.getCodecId()))
+                exclusions.add(itemDescriptorMatcher(descriptor));
+        Predicate<QIOResourceDescriptor> matcher = descriptor -> {
+            if (!QIOResourceCodecs.ITEM_STACK_ID.equals(descriptor.getCodecId())) return false;
+            for (Predicate<QIOResourceDescriptor> exclusion : exclusions)
+                if (exclusion.test(descriptor)) return false;
+            return true;
+        };
+        inputs.add(new Input(1, matcher, () -> matcher, "", QIOResourceCodecs.ITEM_STACK_ID,
+                CloudworksResourceMatcher.itemExclusionList(new ArrayList<>(excluded == null
+                        ? Collections.emptyList() : excluded))));
+        return this;
+    }
+
+    /** Matches only the owner-thread-frozen item entries in an allow-list. */
+    public CloudworksRecipeBatch anyItemOnly(Collection<QIOResourceDescriptor> allowed) {
+        List<Predicate<QIOResourceDescriptor>> matchers = new ArrayList<>();
+        if (allowed != null) for (QIOResourceDescriptor descriptor : allowed)
+            if (descriptor != null && QIOResourceCodecs.ITEM_STACK_ID.equals(descriptor.getCodecId()))
+                matchers.add(itemDescriptorMatcher(descriptor));
+        Predicate<QIOResourceDescriptor> matcher = descriptor -> {
+            if (!QIOResourceCodecs.ITEM_STACK_ID.equals(descriptor.getCodecId())) return false;
+            for (Predicate<QIOResourceDescriptor> candidate : matchers)
+                if (candidate.test(descriptor)) return true;
+            return false;
+        };
+        inputs.add(new Input(1, matcher, () -> matcher, "", QIOResourceCodecs.ITEM_STACK_ID,
+                CloudworksResourceMatcher.itemAllowlist(new ArrayList<>(allowed == null
+                        ? Collections.emptyList() : allowed))));
+        return this;
+    }
+
+    private static Predicate<QIOResourceDescriptor> itemDescriptorMatcher(QIOResourceDescriptor wanted) {
+        NBTTagCompound payload = wanted.getPayload();
+        String id = payload.getString("id");
+        int damage = payload.getShort("Damage");
+        boolean hasTag = payload.hasKey("tag", 10);
+        NBTTagCompound tag = hasTag ? payload.getCompoundTag("tag").copy() : null;
+        return candidate -> {
+            if (!QIOResourceCodecs.ITEM_STACK_ID.equals(candidate.getCodecId())) return false;
+            NBTTagCompound actual = candidate.getPayload();
+            int actualDamage = actual.getShort("Damage");
+            return id.equals(actual.getString("id"))
+                    && (damage == OreDictionary.WILDCARD_VALUE || actualDamage == OreDictionary.WILDCARD_VALUE
+                    || damage == actualDamage)
+                    && hasTag == actual.hasKey("tag", 10)
+                    && (!hasTag || tag.equals(actual.getCompoundTag("tag")));
+        };
     }
 
     public CloudworksRecipeBatch gas(GasStack gas, long amount) {
@@ -265,7 +411,8 @@ public final class CloudworksRecipeBatch {
             GasStack actual = descriptor.resolveGasStackTemplate();
             return actual != null && actual.isGasEqual(wanted);
         },
-                () -> exactMatcher(QIOResourceCodecs.gas(wanted)), port, QIOResourceCodecs.GAS_STACK_ID));
+                () -> exactMatcher(QIOResourceCodecs.gas(wanted)), port, QIOResourceCodecs.GAS_STACK_ID,
+                CloudworksResourceMatcher.exact(QIOResourceCodecs.gas(wanted))));
         return this;
     }
 
@@ -275,19 +422,27 @@ public final class CloudworksRecipeBatch {
         configuration.add(new Input(1, descriptor -> {
             ItemStack actual = descriptor.resolveItemStackTemplate();
             return actual != null && MachineInput.inputItemMatches(actual, wanted);
-        }, () -> frozenItemMatcher(wanted), port, QIOResourceCodecs.ITEM_STACK_ID));
+        }, () -> frozenItemMatcher(wanted), port, QIOResourceCodecs.ITEM_STACK_ID,
+                itemDeclaration(wanted)));
         return this;
     }
 
     public CloudworksRecipeBatch template(GasStack gas, String port) {
         QIOResourceDescriptor wanted = QIOResourceCodecs.gas(gas);
-        configuration.add(new Input(1, exactMatcher(wanted), () -> exactMatcher(wanted), port, QIOResourceCodecs.GAS_STACK_ID));
+        configuration.add(new Input(1, exactMatcher(wanted), () -> exactMatcher(wanted), port, QIOResourceCodecs.GAS_STACK_ID,
+                CloudworksResourceMatcher.exact(wanted)));
         return this;
+    }
+
+    private static CloudworksResourceMatcher itemDeclaration(ItemStack item) {
+        return item.getItem().getRegistryName() == null ? null
+                : CloudworksResourceMatcher.item(QIOResourceCodecs.item(item));
     }
 
     public CloudworksRecipeBatch template(FluidStack fluid, String port) {
         QIOResourceDescriptor wanted = QIOResourceCodecs.fluid(fluid);
-        configuration.add(new Input(1, exactMatcher(wanted), () -> exactMatcher(wanted), port, QIOResourceCodecs.FLUID_STACK_ID));
+        configuration.add(new Input(1, exactMatcher(wanted), () -> exactMatcher(wanted), port, QIOResourceCodecs.FLUID_STACK_ID,
+                CloudworksResourceMatcher.exact(wanted)));
         return this;
     }
 
@@ -309,12 +464,17 @@ public final class CloudworksRecipeBatch {
     }
 
     public CloudworksRecipeBatch fluid(FluidStack fluid) {
+        return fluid(fluid, "");
+    }
+
+    public CloudworksRecipeBatch fluid(FluidStack fluid, String port) {
         FluidStack wanted = fluid.copy();
         inputs.add(new Input(wanted.amount, descriptor -> {
             FluidStack actual = descriptor.resolveFluidStackTemplate();
             return actual != null && actual.isFluidEqual(wanted);
         },
-                () -> exactMatcher(QIOResourceCodecs.fluid(wanted)), "", QIOResourceCodecs.FLUID_STACK_ID));
+                () -> exactMatcher(QIOResourceCodecs.fluid(wanted)), port == null ? "" : port,
+                QIOResourceCodecs.FLUID_STACK_ID, CloudworksResourceMatcher.exact(QIOResourceCodecs.fluid(wanted))));
         return this;
     }
 
@@ -323,7 +483,8 @@ public final class CloudworksRecipeBatch {
         inputs.add(new Input(wanted.getAmount(), descriptor -> {
             InfuseStorage actual = descriptor.resolve(CloudworksInfuseResourceCodec.INSTANCE);
             return actual != null && actual.getType() == wanted.getType();
-        }, () -> exactMatcher(CloudworksInfuseResourceCodec.descriptor(wanted)), "", CloudworksInfuseResourceCodec.ID));
+        }, () -> exactMatcher(CloudworksInfuseResourceCodec.descriptor(wanted)), "", CloudworksInfuseResourceCodec.ID,
+                CloudworksResourceMatcher.exact(CloudworksInfuseResourceCodec.descriptor(wanted))));
         return this;
     }
 
@@ -346,7 +507,46 @@ public final class CloudworksRecipeBatch {
         List<CloudworksResourceStack> output = outputs(1);
         return Optional.of(new FrozenView(frozen, output,
                 Collections.unmodifiableList(new ArrayList<>(chanceOutputs)), outputPorts, energyPerOperation,
-                choiceOutputs, sunlightRequired, frozenConfiguration, decayAmount, extraEnergyPerTick));
+                choiceOutputs, sunlightRequired, frozenConfiguration, decayAmount, extraEnergyPerTick,
+                scalableOutputs, outputMultiplierEnabled));
+    }
+
+    public CloudworksRecipeSpec specification(String id, int duration) {
+        if (!freeze().isPresent()) throw new IllegalArgumentException("Unfreezable recipe: " + id);
+        CloudworksRecipeSpec.Builder builder = CloudworksRecipeSpec.builder(id).duration(duration)
+                .extraEnergyPerTick(extraEnergyPerTick).energyPerOperation(energyPerOperation);
+        for (Input input : inputs) builder.matcher(Objects.requireNonNull(input.declaration), input.amount, input.port);
+        for (Input input : configuration)
+            builder.configurationMatcher(Objects.requireNonNull(input.declaration), input.port);
+        for (int index = 0; index < outputs.size(); index++) {
+            CloudworksResourceStack output = outputs.get(index);
+            if (scalableOutputs.get(index))
+                builder.output(output.descriptor(), output.amount(), outputPorts.get(index));
+            else builder.unscaledOutput(output.descriptor(), output.amount(), outputPorts.get(index));
+        }
+        for (ChanceOutput output : chanceOutputs)
+            builder.chanceOutput(output.descriptor(), output.amount(), output.chance(), output.port());
+        if (!choiceOutputs.isEmpty()) {
+            List<QIOResourceDescriptor> choices = new ArrayList<>();
+            for (CloudworksResourceStack output : choiceOutputs) choices.add(output.descriptor());
+            builder.choiceOutput(choices, choiceOutputs.get(0).amount());
+        }
+        if (sunlightRequired) builder.requireSunlight();
+        if (decayAmount >= 0) builder.decay(decayAmount);
+        if (!outputMultiplierEnabled) builder.unscaledOutputs();
+        if (secondaryGasInputs) builder.secondaryGasInputs();
+        if (secondaryFluidInputs) builder.secondaryFluidInputs();
+        if (secondaryGasInputs || secondaryFluidInputs)
+            builder.nativeSecondaryFuel(mekanism.common.config.MekanismConfig.current().usage.randomizedConsumption.val());
+        return builder.build();
+    }
+
+    public CloudworksRecipeBatch matcher(CloudworksResourceMatcher matcher, long amount, String port,
+            boolean template) {
+        Input input = new Input(amount, matcher::matches, () -> matcher::matches,
+                port, matcher.codec(), matcher);
+        (template ? configuration : inputs).add(input);
+        return this;
     }
 
     public CloudworksRecipeBatch output(ItemStack item) {
@@ -381,6 +581,7 @@ public final class CloudworksRecipeBatch {
     private void addOutput(QIOResourceDescriptor descriptor, long amount, String portId) {
         outputs.add(new CloudworksResourceStack(descriptor, amount));
         outputPorts.add(portId == null ? "" : portId);
+        scalableOutputs.add(true);
     }
 
     public List<CloudworksResourceStack> outputs(int operations) {
@@ -403,7 +604,8 @@ public final class CloudworksRecipeBatch {
         final Predicate<QIOResourceDescriptor> matches;
         final Supplier<Predicate<QIOResourceDescriptor>> frozenMatcher;
         final String port;
-        final net.minecraft.util.ResourceLocation codec;
+        final ResourceLocation codec;
+        final CloudworksResourceMatcher declaration;
 
         Input(long amount, Predicate<QIOResourceDescriptor> matches,
               Supplier<Predicate<QIOResourceDescriptor>> frozenMatcher) {
@@ -417,13 +619,20 @@ public final class CloudworksRecipeBatch {
 
         Input(long amount, Predicate<QIOResourceDescriptor> matches,
               Supplier<Predicate<QIOResourceDescriptor>> frozenMatcher, String port,
-              net.minecraft.util.ResourceLocation codec) {
+              ResourceLocation codec) {
+            this(amount, matches, frozenMatcher, port, codec, null);
+        }
+
+        Input(long amount, Predicate<QIOResourceDescriptor> matches,
+              Supplier<Predicate<QIOResourceDescriptor>> frozenMatcher, String port,
+              ResourceLocation codec, CloudworksResourceMatcher declaration) {
             if (amount <= 0) throw new IllegalArgumentException("Nonpositive recipe input");
             this.amount = amount;
             this.matches = matches;
             this.frozenMatcher = frozenMatcher;
             this.port = Objects.requireNonNull(port);
             this.codec = codec;
+            this.declaration = declaration;
         }
     }
 
@@ -437,15 +646,22 @@ public final class CloudworksRecipeBatch {
         final QIOResourceDescriptor descriptor;
         final long amount;
         final double chance;
+        final String port;
 
         ChanceOutput(QIOResourceDescriptor descriptor, long amount, double chance) {
+            this(descriptor, amount, chance, "");
+        }
+
+        ChanceOutput(QIOResourceDescriptor descriptor, long amount, double chance, String port) {
             if (amount <= 0) throw new IllegalArgumentException("Nonpositive chance output");
             if (chance <= 0D || chance > 1D || !Double.isFinite(chance))
                 throw new IllegalArgumentException("Invalid chance output probability");
             this.descriptor = descriptor;
             this.amount = amount;
+            this.port = port == null ? "" : port;
             this.chance = chance;
         }
+        public String port() { return port; }
 
         public QIOResourceDescriptor descriptor() {
             return descriptor;
@@ -471,11 +687,14 @@ public final class CloudworksRecipeBatch {
         private final boolean sunlightRequired;
         private final long decayAmount;
         private final double extraEnergyPerTick;
+        private final List<Boolean> scalableOutputs;
+        private final boolean outputMultiplierEnabled;
 
         private FrozenView(List<Input> inputs, List<CloudworksResourceStack> outputs,
                            List<ChanceOutput> chanceOutputs, List<String> outputPorts, double energyPerOperation,
                            List<CloudworksResourceStack> choiceOutputs, boolean sunlightRequired, List<Input> configuration,
-                           long decayAmount, double extraEnergyPerTick) {
+                           long decayAmount, double extraEnergyPerTick, List<Boolean> scalableOutputs,
+                           boolean outputMultiplierEnabled) {
             this.inputs = Collections.unmodifiableList(inputs);
             this.outputs = Collections.unmodifiableList(outputs);
             this.chanceOutputs = chanceOutputs;
@@ -486,6 +705,8 @@ public final class CloudworksRecipeBatch {
             this.configuration = Collections.unmodifiableList(configuration);
             this.decayAmount = decayAmount;
             this.extraEnergyPerTick = extraEnergyPerTick;
+            this.scalableOutputs = Collections.unmodifiableList(new ArrayList<>(scalableOutputs));
+            this.outputMultiplierEnabled = outputMultiplierEnabled;
         }
 
         public Map<QIOResourceDescriptor, Long> allocate(Map<QIOResourceDescriptor, Long> stock, int operations) {
@@ -519,8 +740,8 @@ public final class CloudworksRecipeBatch {
             return inputs.get(index).port;
         }
 
-        public net.minecraft.util.ResourceLocation inputCodec(int index) { return inputs.get(index).codec; }
-        public net.minecraft.util.ResourceLocation configurationCodec(int index) { return configuration.get(index).codec; }
+        public ResourceLocation inputCodec(int index) { return inputs.get(index).codec; }
+        public ResourceLocation configurationCodec(int index) { return configuration.get(index).codec; }
 
         public int configurationCount() { return configuration.size(); }
         public Predicate<QIOResourceDescriptor> configurationMatcher(int index) { return configuration.get(index).matches; }
@@ -539,6 +760,9 @@ public final class CloudworksRecipeBatch {
         public String outputPort(int index) {
             return outputPorts.get(index);
         }
+
+        public boolean scalableOutput(int index) { return outputMultiplierEnabled && scalableOutputs.get(index); }
+        public boolean outputMultiplierEnabled() { return outputMultiplierEnabled; }
 
         /**
          * Independently rolled per-operation outputs; pure data, rolled by the worker.

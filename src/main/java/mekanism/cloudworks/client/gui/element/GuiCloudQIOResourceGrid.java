@@ -4,9 +4,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
-import java.util.UUID;
 import java.nio.charset.StandardCharsets;
+import java.util.UUID;
 import java.util.function.Supplier;
+
 import mekanism.api.EnumColor;
 import mekanism.api.gas.GasStack;
 import mekanism.api.qio.client.QIOResourceRenderer;
@@ -15,7 +16,6 @@ import mekanism.api.qio.resource.QIOResourceDescriptor;
 import mekanism.client.gui.GuiUtils;
 import mekanism.client.gui.IGuiWrapper;
 import mekanism.client.gui.element.GuiElement;
-import mekanism.client.gui.element.slot.GuiSlot;
 import mekanism.client.gui.element.scroll.GuiScrollBar;
 import mekanism.client.jei.interfaces.IJEIIngredientHelper;
 import mekanism.client.render.MekanismRenderer;
@@ -30,8 +30,9 @@ import mekanism.common.util.text.TextUtils;
 import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.ResourceLocation;
-import net.minecraft.util.text.TextComponentString;
 import net.minecraftforge.fluids.FluidStack;
+import java.util.Arrays;
+import mekanism.common.Mekanism;
 
 /**
  * QIO terminal resource grid presentation for read-only Cloudworks snapshots.
@@ -47,21 +48,28 @@ public class GuiCloudQIOResourceGrid extends GuiElement implements IJEIIngredien
     private final int rows;
     private final Supplier<List<Entry>> entriesSupplier;
     private final GuiScrollBar scrollBar;
+    private List<Entry> cachedSortedEntries = Collections.emptyList();
 
 
     public GuiCloudQIOResourceGrid(IGuiWrapper gui, int x, int y, int columns, int rows,
-            Supplier<List<Entry>> entriesSupplier) {
+                                   Supplier<List<Entry>> entriesSupplier) {
         super(gui, x, y, columns * 18 + 18, rows * 18);
         this.columns = Math.max(1, columns);
         this.rows = Math.max(1, rows);
         this.entriesSupplier = entriesSupplier;
         scrollBar = addChild(new GuiScrollBar(gui, relativeX + this.columns * 18, relativeY, this.rows * 18, this::getTotalRows, () -> this.rows));
+        refreshSortedEntries();
         active = true;
     }
 
     @Override
+    public void tick() {
+        super.tick();
+        refreshSortedEntries();
+    }
+
+    @Override
     public void drawBackground(int mouseX, int mouseY, float partialTicks) {
-        MekanismRenderer.resetGuiRenderState();
         super.drawBackground(mouseX, mouseY, partialTicks);
         List<Entry> entries = getSortedEntries();
         minecraft.renderEngine.bindTexture(entries.isEmpty() ? SLOTS_DARK : SLOTS);
@@ -80,21 +88,28 @@ public class GuiCloudQIOResourceGrid extends GuiElement implements IJEIIngredien
             renderEntry(entries.get(index).resource, relativeX + slot % columns * 18,
                     relativeY + slot / columns * 18);
         }
-        MekanismRenderer.resetGuiRenderState();
     }
 
     @Override
     public void renderForeground(int mouseX, int mouseY) {
-        MekanismRenderer.resetGuiRenderState();
         super.renderForeground(mouseX, mouseY);
-        int slot = getSlot(mouseX, mouseY);
-        if (slot >= 0) {
-            int x = relativeX + slot % columns * 18 + 1;
-            int y = relativeY + slot / columns * 18 + 1;
-            GuiUtils.fill(x, y, x + 16, y + 16, GuiSlot.DEFAULT_HOVER_COLOR);
-            MekanismRenderer.resetGuiRenderState();
+        List<Entry> entries = getSortedEntries();
+        int first = scrollBar.getCurrentSelection() * columns;
+        int hoveredSlot = getSlot(mouseX, mouseY);
+        for (int visible = 0; visible < columns * rows; visible++) {
+            int index = first + visible;
+            if (index >= entries.size()) {
+                break;
+            }
+            QIOResourceEntry entry = entries.get(index).resource;
+            int x = relativeX + visible % columns * 18;
+            int y = relativeY + visible / columns * 18;
+            CloudworksSlotRenderer.draw(x, y, isSelected(entry), true, visible == hoveredSlot);
         }
-        MekanismRenderer.resetGuiRenderState();
+    }
+
+    protected boolean isSelected(QIOResourceEntry entry) {
+        return false;
     }
 
     @Override
@@ -130,7 +145,7 @@ public class GuiCloudQIOResourceGrid extends GuiElement implements IJEIIngredien
             gui().renderItemTooltipWithExtra(entry.getItem(), mouseX, mouseY,
                     Collections.singletonList(getStoredTooltip(entry.getExactAmount())));
         } else {
-            displayTooltips(java.util.Arrays.asList(getResourceName(entry),
+            displayTooltips(Arrays.asList(getResourceName(entry),
                     getStoredTooltip(entry.getExactAmount())), mouseX, mouseY);
         }
         MekanismRenderer.resetGuiRenderState();
@@ -162,14 +177,19 @@ public class GuiCloudQIOResourceGrid extends GuiElement implements IJEIIngredien
     }
 
     protected List<Entry> getSortedEntries() {
+        return cachedSortedEntries;
+    }
+
+    private void refreshSortedEntries() {
         List<Entry> entries = entriesSupplier.get();
         if (entries == null || entries.isEmpty()) {
-            return Collections.emptyList();
+            cachedSortedEntries = Collections.emptyList();
+            return;
         }
         List<Entry> sorted = new ArrayList<>(entries);
         sorted.sort(Comparator.comparing(entry -> getResourceName(entry.resource),
                 String.CASE_INSENSITIVE_ORDER));
-        return sorted;
+        cachedSortedEntries = Collections.unmodifiableList(sorted);
     }
 
     private int getTotalRows() {
@@ -208,7 +228,6 @@ public class GuiCloudQIOResourceGrid extends GuiElement implements IJEIIngredien
     }
 
     private void renderEntry(QIOResourceEntry entry, int x, int y) {
-        MekanismRenderer.resetGuiRenderState();
         boolean rendered = renderWithRegisteredRenderer(entry, x + 1, y + 1);
         QIOResourceKind kind = entry.getKind();
         if (!rendered && kind == QIOResourceKind.ITEM && !entry.getItem().isEmpty()) {
@@ -232,14 +251,17 @@ public class GuiCloudQIOResourceGrid extends GuiElement implements IJEIIngredien
                     marker = "G";
                 }
             }
-            drawTextWithScale(new TextComponentString(marker), x + 5, y + 4, 0xFFFFFFFF, 0.75F);
+            GlStateManager.pushMatrix();
+            GlStateManager.translate(x + 5, y + 4, 100);
+            GlStateManager.scale(0.75F, 0.75F, 0.75F);
+            getFont().drawString(marker, 0, 0, 0xFFFFFFFF);
+            GlStateManager.popMatrix();
         }
         String count = getCountText(entry.getExactAmount());
         if (count != null) {
             renderSlotText(count, x + 1, y + 1, entry.getExactAmount().isZero()
                     ? 0xFFFFFF55 : 0xFFFFFFFF);
         }
-        MekanismRenderer.resetGuiRenderState();
     }
 
     private boolean renderWithRegisteredRenderer(QIOResourceEntry entry, int x, int y) {
@@ -285,6 +307,9 @@ public class GuiCloudQIOResourceGrid extends GuiElement implements IJEIIngredien
                     return name;
                 }
             } catch (RuntimeException | LinkageError ignored) {
+                if (Mekanism.logger != null)
+                    Mekanism.logger.debug("Could not resolve Cloudworks QIO resource display name {}",
+                            entry.getDescriptor().getCodecId(), ignored);
             }
         }
         QIOResourceKind kind = entry.getKind();
@@ -341,14 +366,18 @@ public class GuiCloudQIOResourceGrid extends GuiElement implements IJEIIngredien
     }
 
     private void renderSlotText(String text, int x, int y, int color) {
+        GlStateManager.pushMatrix();
+        MekanismRenderer.resetColor();
         float scale = 0.6F;
         int width = getFont().getStringWidth(text);
         if (width > 0) {
             scale = Math.min(1, 16F / (width * scale)) * scale;
         }
         float yAdd = 4 - scale * 4;
-        drawTextWithScale(new TextComponentString(text), x + 16 - width * scale,
-                y + 9 + yAdd, color, scale);
+        GlStateManager.translate(x + 16 - width * scale, y + 9 + yAdd, 200);
+        GlStateManager.scale(scale, scale, scale);
+        getFont().drawString(text, 0, 0, color);
+        GlStateManager.popMatrix();
     }
 
     public static final class Entry {
@@ -356,6 +385,15 @@ public class GuiCloudQIOResourceGrid extends GuiElement implements IJEIIngredien
 
         public QIOResourceDescriptor descriptor() {
             return resource.getDescriptor();
+        }
+
+        /**
+         * Exposes the complete entry for interaction rules that need the
+         * resource kind and stored amount, matching the native QIO grid
+         * selection helpers.
+         */
+        public QIOResourceEntry resourceEntry() {
+            return resource;
         }
 
         public Entry(QIOResourceDescriptor descriptor, long amount) {

@@ -12,6 +12,6 @@ public final class CloudworksDissolutionRecipeAdapter extends CloudworksNativeRe
 
     @Override
     protected CloudworksRecipeBatch describe(DissolutionRecipe recipe) {
-        return new CloudworksRecipeBatch().item(recipe.getItemInput()).gas(recipe.getGasInput(), 100L * recipe.getGasInput().amount).output(recipe.getOutput().output);
+        return new CloudworksRecipeBatch().secondaryGasInputs().item(recipe.getItemInput()).gas(recipe.getGasInput(), 100L * recipe.getGasInput().amount).output(recipe.getOutput().output);
     }
 }

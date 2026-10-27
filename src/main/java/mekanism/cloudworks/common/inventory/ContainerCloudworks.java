@@ -19,6 +19,7 @@ import mekanism.cloudworks.common.service.CloudworksServerTickService;
 import mekanism.cloudworks.common.service.CloudworksPlayerDataManager;
 import mekanism.cloudworks.common.util.CloudworksMessages;
 import mekanism.cloudworks.common.config.CloudworksConfig;
+import mekanism.cloudworks.common.team.CloudworksTeamContext;
 import mekanism.common.inventory.container.MekanismContainer;
 import mekanism.common.inventory.container.SelectedWindowData;
 import mekanism.common.inventory.container.slot.HotBarSlot;
@@ -36,6 +37,36 @@ import javax.annotation.Nonnull;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import io.netty.buffer.Unpooled;
+import java.util.Collections;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
+import java.util.Objects;
+import java.util.Set;
+import mekanism.api.qio.resource.QIOResourceDescriptor;
+import mekanism.cloudworks.common.content.CloudworksTerminalItemHost;
+import mekanism.cloudworks.common.data.CloudworksTerminalState;
+import mekanism.cloudworks.common.data.ProductionLineData;
+import mekanism.cloudworks.common.network.CloudworksGuiCodec;
+import mekanism.cloudworks.common.network.CloudworksLineDraftCodec;
+import mekanism.cloudworks.common.network.data.CloudworksLineDraft;
+import mekanism.cloudworks.common.network.PacketCloudworksLineEdit;
+import mekanism.cloudworks.common.network.PacketCloudworksLineEditResult;
+import mekanism.cloudworks.common.service.CloudworksDraftGeometry;
+import mekanism.cloudworks.common.service.CloudworksLineEditSession;
+import mekanism.cloudworks.common.service.CloudworksResourceQuery;
+import mekanism.cloudworks.common.team.CloudworksTeamManager;
+import mekanism.cloudworks.common.tile.TileEntityCloudDashboard;
+import mekanism.common.inventory.container.item.ItemStackSlotAccess;
+import mekanism.common.inventory.slot.BasicInventorySlot;
+import mekanism.common.Mekanism;
+import mekanism.common.util.SecurityUtils;
+import net.minecraft.inventory.ClickType;
+import net.minecraft.network.PacketBuffer;
+import net.minecraft.util.EnumHand;
 
 public final class ContainerCloudworks extends MekanismContainer {
     /**
@@ -45,7 +76,8 @@ public final class ContainerCloudworks extends MekanismContainer {
     public static final int SLOT_MACHINE_IN = 0, SLOT_MACHINE_OUT = 1, SLOT_ENERGY_IN = 2,
             SLOT_UPGRADE_IN = 3, SLOT_UPGRADE_OUT = 4;
     private final EntityPlayer owner;
-    private final UUID cloudOwner;
+    private UUID cloudOwner;
+    private final boolean teamTerminal;
     @Nullable
     private final CloudworksTerminalHost host;
     private final List<VirtualInventoryContainerSlot> terminalSlots = new ArrayList<>();
@@ -64,11 +96,11 @@ public final class ContainerCloudworks extends MekanismContainer {
     private int syncTicks;
     private boolean initialGuiSync = true;
     private byte[][] lastSentData;
-    private java.util.concurrent.FutureTask<CloudworksGuiService.Result> guiTask;
+    private FutureTask<CloudworksGuiService.Result> guiTask;
     private CloudworksGuiRequest runningGuiRequest, pendingGuiRequest;
     private String pendingGuiRequestStatus = "";
-    private java.util.concurrent.FutureTask<mekanism.cloudworks.common.service.CloudworksResourceQuery.Result> resourceTask;
-    private mekanism.cloudworks.common.service.CloudworksResourceQuery pendingResourceQuery, runningResourceQuery;
+    private FutureTask<CloudworksResourceQuery.Result> resourceTask;
+    private CloudworksResourceQuery pendingResourceQuery, runningResourceQuery;
     private long sentDataGeneration, receivedDataGeneration, pendingDataGeneration;
     private int pendingDataChunk, pendingDataChunks;
     private long pendingDataSequence;
@@ -76,7 +108,7 @@ public final class ContainerCloudworks extends MekanismContainer {
     private CloudworksGuiData pendingData;
     private boolean pendingGraphSample;
     private UUID graphLine;
-    private java.util.List<mekanism.api.qio.resource.QIOResourceDescriptor> resourceChoices = java.util.Collections.emptyList();
+    private List<QIOResourceDescriptor> resourceChoices = Collections.emptyList();
     private UUID resourceLine, resourceNode;
     private int resourceOffset, resourceTotal;
     private int linesSelection = -1;
@@ -84,18 +116,19 @@ public final class ContainerCloudworks extends MekanismContainer {
     private int cacheViewType = -2;
     /** 三仓查看视图态. */
     private boolean warehousesView;
+    private boolean catalogView;
     /** 回收站查看视图态. */
     private boolean recycleView;
-    private mekanism.cloudworks.common.service.CloudworksLineEditSession lineEditSession;
-    private final java.util.concurrent.atomic.AtomicBoolean lifecycleClosed = new java.util.concurrent.atomic.AtomicBoolean();
-    private final java.util.concurrent.atomic.AtomicReference<mekanism.cloudworks.common.service.CloudworksLineEditSession>
-            serverEditSession = new java.util.concurrent.atomic.AtomicReference<>();
+    private CloudworksLineEditSession lineEditSession;
+    private final AtomicBoolean lifecycleClosed = new AtomicBoolean();
+    private final AtomicReference<CloudworksLineEditSession>
+            serverEditSession = new AtomicReference<>();
     private long editRequest, editResultVersion;
     private long editRequestAt;
     private boolean editRequestPending;
     public int editResultOperation;
     public UUID editToken;
-    public mekanism.cloudworks.common.network.data.CloudworksLineDraft editSnapshot;
+    public CloudworksLineDraft editSnapshot;
     public String editError = "";
     private long blueprintRequest, blueprintVersion;
     private long blueprintRequestAt;
@@ -124,7 +157,7 @@ public final class ContainerCloudworks extends MekanismContainer {
     }
 
     public void requestBlueprint(int operation, UUID line, UUID entry, String code,
-            CloudworksBlueprint blueprint, int x, int y, java.util.Set<UUID> selection) {
+            CloudworksBlueprint blueprint, int x, int y, Set<UUID> selection) {
         if (session == null || blueprintBusy) return;
         CloudworksNetwork.CHANNEL.sendToServer(new PacketCloudworksBlueprint.Request(
                 this, operation, line, entry, code, blueprint, x, y, selection));
@@ -145,7 +178,6 @@ public final class ContainerCloudworks extends MekanismContainer {
         UUID actor = owner.getUniqueID(), cloudOwner = ownerId();
         String actorName = owner.getName();
         boolean operator = owner.canUseCommand(2, "cloudworks");
-        int dimension = owner.dimension;
         boolean queued = CloudworksServerTickService.INSTANCE.submitStructuralCommand(cloudOwner, () -> {
             PacketCloudworksBlueprint.Result result = new PacketCloudworksBlueprint.Result();
             result.operation = request.operation;
@@ -153,7 +185,8 @@ public final class ContainerCloudworks extends MekanismContainer {
                 CloudworksPlayerDataManager manager = CloudworksPlayerDataManager.INSTANCE;
                 synchronized (manager.ownerLock(cloudOwner)) {
                     if (lifecycleClosed.get()) return;
-                    mekanism.cloudworks.common.service.CloudworksLineEditSession edit = serverEditSession.get();
+                    if (teamTerminal && !CloudworksTeamContext.canAccess(actor, cloudOwner)) return;
+                    CloudworksLineEditSession edit = serverEditSession.get();
                     if (request.operation == PacketCloudworksBlueprint.PLACE || request.operation == PacketCloudworksBlueprint.PARSE
                             || request.operation == PacketCloudworksBlueprint.PRECHECK
                             || request.operation == PacketCloudworksBlueprint.REQUIREMENTS || request.operation == PacketCloudworksBlueprint.FILL
@@ -164,16 +197,17 @@ public final class ContainerCloudworks extends MekanismContainer {
                     CloudworksBlueprintLibrary library = CloudworksBlueprintLibrary.INSTANCE;
                     switch (request.operation) {
                         case PacketCloudworksBlueprint.EXPORT -> {
-                            if (!actor.equals(cloudOwner)) throw new IllegalStateException("cloudworks.error.permission");
-                            mekanism.cloudworks.common.data.ProductionLineData selectedLine =
+                            if (!teamTerminal && !actor.equals(cloudOwner))
+                                throw new IllegalStateException("cloudworks.error.permission");
+                            ProductionLineData selectedLine =
                                     request.line == null ? null : manager.ownedLine(cloudOwner, request.line);
                             if (selectedLine == null) throw new IllegalStateException("cloudworks.error.not_found");
-                            mekanism.cloudworks.common.network.data.CloudworksLineDraft draft =
-                                    edit != null && edit.line.equals(request.line) ? edit.snapshot()
-                                            : mekanism.cloudworks.common.service.CloudworksLineConfiguration.capture(selectedLine);
+                            CloudworksLineDraft draft =
+                                    manager.blueprintExportDraft(cloudOwner, request.line, edit);
                             if (!request.selection.isEmpty()) draft =
-                                    mekanism.cloudworks.common.service.CloudworksDraftGeometry.selection(draft, request.selection);
-                            CloudworksBlueprint blueprint = new CloudworksBlueprint(actorName, actor, System.currentTimeMillis(), draft);
+                                    CloudworksDraftGeometry.selection(draft, request.selection);
+                            CloudworksBlueprint blueprint = new CloudworksBlueprint(actorName, actor, System.currentTimeMillis(), draft)
+                                    .withExtensions(selectedLine.extensions());
                             blueprint.validate();
                             result.code = library.put(blueprint).toString();
                         }
@@ -204,13 +238,13 @@ public final class ContainerCloudworks extends MekanismContainer {
                         }
                         case PacketCloudworksBlueprint.PLACE -> {
                             CloudworksBlueprint blueprint = CloudworksBlueprint.fromBytes(request.payload);
-                            manager.placeBlueprint(edit, blueprint, request.x, request.y, dimension);
+                            manager.placeBlueprint(edit, blueprint, request.x, request.y);
                             result.draft = manager.lineEditSnapshot(edit);
                             result.filled = edit.pending == null;
                         }
                         case PacketCloudworksBlueprint.REQUIREMENTS -> result.requirements.addAll(manager.blueprintRequirements(edit));
                         case PacketCloudworksBlueprint.FILL, PacketCloudworksBlueprint.CANCEL -> {
-                            result.filled = manager.fillBlueprint(edit, request.operation == PacketCloudworksBlueprint.CANCEL, dimension);
+                            result.filled = manager.fillBlueprint(edit, request.operation == PacketCloudworksBlueprint.CANCEL);
                             if (result.filled) result.draft = manager.lineEditSnapshot(edit);
                             if (!result.filled) result.requirements.addAll(manager.blueprintRequirements(edit));
                         }
@@ -236,13 +270,13 @@ public final class ContainerCloudworks extends MekanismContainer {
     }
 
     public void requestLineEdit(int operation, UUID line,
-            mekanism.cloudworks.common.network.data.CloudworksLineDraft draft) {
+            CloudworksLineDraft draft) {
         if (session == null) return;
         if (draft != null) {
-            net.minecraft.network.PacketBuffer buffer = new net.minecraft.network.PacketBuffer(io.netty.buffer.Unpooled.buffer());
+            PacketBuffer buffer = new PacketBuffer(Unpooled.buffer());
             try {
-                mekanism.cloudworks.common.network.CloudworksLineDraftCodec.write(buffer, draft);
-                if (buffer.readableBytes() > mekanism.cloudworks.common.network.CloudworksGuiCodec.MAX_BYTES - 256)
+                CloudworksLineDraftCodec.write(buffer, draft);
+                if (buffer.readableBytes() > CloudworksGuiCodec.MAX_BYTES - 256)
                     throw new IllegalArgumentException("cloudworks.error.editor_size");
             } catch (RuntimeException oversized) {
                 editError = "cloudworks.error.editor_size";
@@ -253,7 +287,7 @@ public final class ContainerCloudworks extends MekanismContainer {
                 buffer.release();
             }
         }
-        CloudworksNetwork.CHANNEL.sendToServer(new mekanism.cloudworks.common.network.PacketCloudworksLineEdit.Message(
+        CloudworksNetwork.CHANNEL.sendToServer(new PacketCloudworksLineEdit.Message(
                 this, operation, line, editToken, draft));
         editRequest = clientSequence;
         editRequestPending = true;
@@ -261,7 +295,7 @@ public final class ContainerCloudworks extends MekanismContainer {
     }
 
     public void acceptLineEdit(long sequence, int operation, UUID token,
-            mekanism.cloudworks.common.network.data.CloudworksLineDraft draft, String error) {
+            CloudworksLineDraft draft, String error) {
         if (sequence != editRequest) return;
         editRequestPending = false;
         editRequestAt = 0;
@@ -273,34 +307,35 @@ public final class ContainerCloudworks extends MekanismContainer {
     }
 
     public void handleLineEdit(int operation, UUID line, UUID token,
-            mekanism.cloudworks.common.network.data.CloudworksLineDraft draft, long sequence) {
+            CloudworksLineDraft draft, long sequence) {
         // Runtime §3.3: the editor's BEGIN/RELOAD/COMMIT do full-line NBT
         // decode/encode inside the manager; that work runs on the structural
         // command worker. Container and session fields are captured here on the
         // main thread and only written back inside the result hop.
         UUID cloudOwner = ownerId();
-        int dimension = owner.dimension;
-        mekanism.cloudworks.common.service.CloudworksLineEditSession currentSession = lineEditSession;
-        boolean queued = mekanism.cloudworks.common.service.CloudworksServerTickService.INSTANCE
+        UUID actor = owner.getUniqueID();
+        CloudworksLineEditSession currentSession = lineEditSession;
+        boolean queued = CloudworksServerTickService.INSTANCE
                 .submitStructuralCommand(cloudOwner, () -> {
             String error = "";
-            mekanism.cloudworks.common.network.data.CloudworksLineDraft snapshot = null;
-            mekanism.cloudworks.common.service.CloudworksLineEditSession session = currentSession;
+            CloudworksLineDraft snapshot = null;
+            CloudworksLineEditSession session = currentSession;
             try {
                 CloudworksPlayerDataManager manager = CloudworksPlayerDataManager.INSTANCE;
                 synchronized (manager.ownerLock(cloudOwner)) {
                     if (lifecycleClosed.get()) return;
-                    if (operation == mekanism.cloudworks.common.network.PacketCloudworksLineEdit.BEGIN
-                            || operation == mekanism.cloudworks.common.network.PacketCloudworksLineEdit.RELOAD) {
-                        if (operation == mekanism.cloudworks.common.network.PacketCloudworksLineEdit.RELOAD
+                    if (teamTerminal && !CloudworksTeamContext.canAccess(actor, cloudOwner)) return;
+                    if (operation == PacketCloudworksLineEdit.BEGIN
+                            || operation == PacketCloudworksLineEdit.RELOAD) {
+                        if (operation == PacketCloudworksLineEdit.RELOAD
                                 && session != null) {
                             try {
                                 if (!manager.abortLineEdit(session))
-                                    mekanism.common.Mekanism.logger.warn(
+                                    Mekanism.logger.warn(
                                             "Cloudworks line {} changed during editing; leaving its current state unchanged",
                                             session.line);
                             } catch (RuntimeException failure) {
-                                mekanism.common.Mekanism.logger.error(
+                                Mekanism.logger.error(
                                         "Could not restore Cloudworks line {} after editor closure",
                                         session.line, failure);
                             }
@@ -313,12 +348,12 @@ public final class ContainerCloudworks extends MekanismContainer {
                     } else {
                         if (session == null || !session.token.equals(token)
                                 || !session.line.equals(line)) throw new IllegalStateException("cloudworks.error.stale");
-                        if (operation == mekanism.cloudworks.common.network.PacketCloudworksLineEdit.COMMIT) {
-                            manager.updateLineDraft(session, draft, dimension);
-                            manager.commitLineEdit(session, session.current, dimension);
+                        if (operation == PacketCloudworksLineEdit.COMMIT) {
+                            manager.updateLineDraft(session, draft);
+                            manager.commitLineEdit(session, session.current);
                             session = null;
-                        } else if (operation == mekanism.cloudworks.common.network.PacketCloudworksLineEdit.SYNC) {
-                            manager.updateLineDraft(session, draft, dimension);
+                        } else if (operation == PacketCloudworksLineEdit.SYNC) {
+                            manager.updateLineDraft(session, draft);
                         } else throw new IllegalArgumentException("cloudworks.error.editor");
                         if (session != null) snapshot = manager.lineEditSnapshot(session);
                     }
@@ -333,20 +368,20 @@ public final class ContainerCloudworks extends MekanismContainer {
                 error = CloudworksMessages.errorKey(failure);
                 if (session != null) snapshot = CloudworksPlayerDataManager.INSTANCE.lineEditSnapshot(session);
             }
-            final mekanism.cloudworks.common.service.CloudworksLineEditSession result = session;
+            final CloudworksLineEditSession result = session;
             final String resultError = error;
-            final mekanism.cloudworks.common.network.data.CloudworksLineDraft resultSnapshot = snapshot;
-            mekanism.cloudworks.common.network.CloudworksNetwork.hopToMainThread(() -> {
+            final CloudworksLineDraft resultSnapshot = snapshot;
+            CloudworksNetwork.hopToMainThread(() -> {
                 if (owner.openContainer != this || !canInteractWith(owner))
                     return;
                 lineEditSession = result;
-                if (resultError.isEmpty() && (operation == mekanism.cloudworks.common.network.PacketCloudworksLineEdit.BEGIN
-                        || operation == mekanism.cloudworks.common.network.PacketCloudworksLineEdit.RELOAD)) {
+                if (resultError.isEmpty() && (operation == PacketCloudworksLineEdit.BEGIN
+                        || operation == PacketCloudworksLineEdit.RELOAD)) {
                     selectGraph(line);
                     selectCacheView(-1);
                 }
                 sendData(resultError);
-                CloudworksNetwork.CHANNEL.sendTo(new mekanism.cloudworks.common.network.PacketCloudworksLineEditResult.Message(
+                CloudworksNetwork.CHANNEL.sendTo(new PacketCloudworksLineEditResult.Message(
                         this, sequence, operation, result == null ? null : result.token, resultSnapshot, resultError),
                         (EntityPlayerMP) owner);
             });
@@ -355,14 +390,14 @@ public final class ContainerCloudworks extends MekanismContainer {
             // Saturated command queue: answer immediately so the client editor
             // never waits on a result that will not come.
             sendData("cloudworks.error.busy");
-            CloudworksNetwork.CHANNEL.sendTo(new mekanism.cloudworks.common.network.PacketCloudworksLineEditResult.Message(
+            CloudworksNetwork.CHANNEL.sendTo(new PacketCloudworksLineEditResult.Message(
                     this, sequence, operation, lineEditSession == null ? null : lineEditSession.token, null,
                     "cloudworks.error.busy"), (EntityPlayerMP) owner);
         }
     }
 
     public ContainerCloudworks(InventoryPlayer inventory) {
-        this(inventory, null);
+        this(inventory, null, null, false);
     }
 
     /**
@@ -370,10 +405,17 @@ public final class ContainerCloudworks extends MekanismContainer {
      * (terminal item NBT or dashboard tile NBT — never the cloud record).
      */
     public ContainerCloudworks(InventoryPlayer inventory, @Nullable CloudworksTerminalHost host) {
+        this(inventory, host, null, false);
+    }
+
+    public ContainerCloudworks(InventoryPlayer inventory, @Nullable CloudworksTerminalHost host,
+            @Nullable UUID ownerOverride, boolean teamTerminal) {
         super(inventory);
         owner = inventory.player;
         this.host = host;
-        cloudOwner = host instanceof mekanism.cloudworks.common.tile.TileEntityCloudDashboard dashboard
+        this.teamTerminal = teamTerminal;
+        cloudOwner = ownerOverride != null ? ownerOverride : teamTerminal ? new UUID(0, 0)
+                : host instanceof TileEntityCloudDashboard dashboard
                 ? dashboard.getSecurity().getOwnerUUID() : owner.getUniqueID();
         if (!owner.world.isRemote) session = UUID.randomUUID();
         if (!owner.world.isRemote && host != null) {
@@ -409,7 +451,7 @@ public final class ContainerCloudworks extends MekanismContainer {
         List<IInventorySlot> slots = host.terminalSlots();
         for (int index = 0; index < slots.size(); index++) {
             IInventorySlot slot = slots.get(index);
-            if (!(slot instanceof mekanism.common.inventory.slot.BasicInventorySlot basic)) continue;
+            if (!(slot instanceof BasicInventorySlot basic)) continue;
             VirtualInventoryContainerSlot containerSlot = new VirtualInventoryContainerSlot(
                     basic, terminalWindowData(index), null, basic::setStackUnchecked);
             terminalSlots.add(containerSlot);
@@ -442,14 +484,14 @@ public final class ContainerCloudworks extends MekanismContainer {
     }
 
     @Override
-    public net.minecraft.item.ItemStack slotClick(int slotId, int dragType, net.minecraft.inventory.ClickType clickType, EntityPlayer player) {
+    public ItemStack slotClick(int slotId, int dragType, ClickType clickType, EntityPlayer player) {
         if (!player.world.isRemote && !canInteractWith(player)) return ItemStack.EMPTY;
-        if (host instanceof mekanism.cloudworks.common.content.CloudworksTerminalItemHost itemHost
-                && clickType == net.minecraft.inventory.ClickType.SWAP) {
-            mekanism.common.inventory.container.item.ItemStackSlotAccess access = itemHost.itemAccess();
+        if (host instanceof CloudworksTerminalItemHost itemHost
+                && clickType == ClickType.SWAP) {
+            ItemStackSlotAccess access = itemHost.itemAccess();
             // Same backing-slot protection as PortableQIODashboardContainer.
-            if (access.getHand() == net.minecraft.util.EnumHand.OFF_HAND && dragType == 40
-                    || access.getHand() == net.minecraft.util.EnumHand.MAIN_HAND
+            if (access.getHand() == EnumHand.OFF_HAND && dragType == 40
+                    || access.getHand() == EnumHand.MAIN_HAND
                     && dragType >= 0 && dragType < hotBarSlots.size()
                     && !hotBarSlots.get(dragType).canTakeStack(player)) return ItemStack.EMPTY;
         }
@@ -461,16 +503,16 @@ public final class ContainerCloudworks extends MekanismContainer {
             }
             if (inventorySlots.get(slotId) instanceof VirtualInventoryContainerSlot virtual
                     && terminalSlots.contains(virtual)) {
-                if (clickType == net.minecraft.inventory.ClickType.SWAP) {
-                    return net.minecraft.item.ItemStack.EMPTY;
+                if (clickType == ClickType.SWAP) {
+                    return ItemStack.EMPTY;
                 }
             }
         }
         if (owner.world.isRemote || host == null) return super.slotClick(slotId, dragType, clickType, player);
         CloudworksPlayerDataManager manager = CloudworksPlayerDataManager.INSTANCE;
         if (!manager.terminalReady(terminalSession)) return ItemStack.EMPTY;
-        mekanism.cloudworks.common.data.CloudworksTerminalState before =
-                mekanism.cloudworks.common.data.CloudworksTerminalState.capture(ownerId(), host);
+        CloudworksTerminalState before =
+                CloudworksTerminalState.capture(ownerId(), host);
         List<ItemStack> inventoryBefore = new ArrayList<>();
         for (int i = 0; i < player.inventory.getSizeInventory(); i++)
             inventoryBefore.add(player.inventory.getStackInSlot(i).copy());
@@ -480,10 +522,11 @@ public final class ContainerCloudworks extends MekanismContainer {
             ItemStack result = super.slotClick(slotId, dragType, clickType, player);
             host.persist();
             // Persist ordinary clicks in the host; cloud transfers alone own the durable journal.
-            mekanism.cloudworks.common.data.CloudworksTerminalState after =
-                    mekanism.cloudworks.common.data.CloudworksTerminalState.capture(ownerId(), host);
+            CloudworksTerminalState after =
+                    CloudworksTerminalState.capture(ownerId(), host);
             boolean changed = !before.write().getTag("slots").equals(after.write().getTag("slots"));
-            if (changed && !after.stack(SLOT_UPGRADE_IN).isEmpty()
+            if (CloudworksConfig.settings().terminalItemUploadsEnabled
+                    && changed && !after.stack(SLOT_UPGRADE_IN).isEmpty()
                     && !ItemStack.areItemStacksEqual(before.stack(SLOT_UPGRADE_IN), after.stack(SLOT_UPGRADE_IN))) {
                 manager.processTerminalUpgradeInput(terminalSession);
             }
@@ -521,8 +564,8 @@ public final class ContainerCloudworks extends MekanismContainer {
     @Override
     protected HotBarSlot createHotBarSlot(
             @Nonnull InventoryPlayer inventory, int index, int x, int y) {
-        boolean locked = host instanceof mekanism.cloudworks.common.content.CloudworksTerminalItemHost itemHost
-                && itemHost.itemAccess().getHand() == net.minecraft.util.EnumHand.MAIN_HAND
+        boolean locked = host instanceof CloudworksTerminalItemHost itemHost
+                && itemHost.itemAccess().getHand() == EnumHand.MAIN_HAND
                 && index == itemHost.itemAccess().getSlot();
         return CloudworksPlayerInventorySlots.hotbar(this, inventory, index, x, y, locked);
     }
@@ -543,20 +586,20 @@ public final class ContainerCloudworks extends MekanismContainer {
     private void persistIdentityOnClose() {
         try { host.persistIdentity(); }
         catch (RuntimeException pendingOrFailed) {
-            mekanism.common.Mekanism.logger.warn("Cloudworks terminal identity save deferred", pendingOrFailed);
+            Mekanism.logger.warn("Cloudworks terminal identity save deferred", pendingOrFailed);
         }
     }
 
     private void finishLineEditSession() {
-        mekanism.cloudworks.common.service.CloudworksLineEditSession ending = serverEditSession.getAndSet(null);
+        CloudworksLineEditSession ending = serverEditSession.getAndSet(null);
         if (ending == null) ending = lineEditSession;
         lineEditSession = null;
         if (ending == null) return;
-        final mekanism.cloudworks.common.service.CloudworksLineEditSession closedSession = ending;
+        final CloudworksLineEditSession closedSession = ending;
         if (!CloudworksServerTickService.INSTANCE.submitStructuralCommand(closedSession.owner, () -> {
             try { CloudworksPlayerDataManager.INSTANCE.abortLineEdit(closedSession); }
             catch (RuntimeException failure) {
-                mekanism.common.Mekanism.logger.error("Could not restore Cloudworks line after editor closure", failure);
+                Mekanism.logger.error("Could not restore Cloudworks line after editor closure", failure);
             }
         })) CloudworksPlayerDataManager.INSTANCE.abortLineEdit(closedSession);
     }
@@ -568,7 +611,7 @@ public final class ContainerCloudworks extends MekanismContainer {
             if (terminalSession == null)
                 terminalSession = manager.openTerminal(ownerId(), host);
             // Apply completed transfers before vanilla compares and syncs the virtual slots.
-            if (manager.terminalReady(terminalSession)
+            if (CloudworksConfig.settings().terminalItemUploadsEnabled && manager.terminalReady(terminalSession)
                     && !host.terminalSlots().get(SLOT_UPGRADE_IN).isEmpty()) {
                 manager.processTerminalUpgradeInput(terminalSession);
             }
@@ -608,9 +651,13 @@ public final class ContainerCloudworks extends MekanismContainer {
         }
     }
 
-    public void downloadUpgrade(boolean speed, boolean shift) {
+    /** Downloads one upgrade type: "speed", "energy", or a namespaced custom id. */
+    public void downloadUpgrade(String type, boolean shift) {
         if (host == null || owner.world.isRemote) return;
-        CloudworksPlayerDataManager.INSTANCE.terminalDownloadUpgrade(terminalSession, speed, shift);
+        if ("speed".equals(type) || "energy".equals(type))
+            CloudworksPlayerDataManager.INSTANCE.terminalDownloadUpgrade(terminalSession, "speed".equals(type), shift);
+        else
+            CloudworksPlayerDataManager.INSTANCE.terminalDownloadCustomUpgrade(terminalSession, type, shift);
     }
 
     public static boolean enabled(EntityPlayer player) {
@@ -622,7 +669,7 @@ public final class ContainerCloudworks extends MekanismContainer {
     public void selectGraph(UUID id) {
         cancelResourceQuery();
         graphLine = id;
-        resourceChoices = java.util.Collections.emptyList();
+        resourceChoices = Collections.emptyList();
         resourceLine = resourceNode = null;
     }
 
@@ -636,6 +683,11 @@ public final class ContainerCloudworks extends MekanismContainer {
         warehousesView = enabled;
     }
 
+    /** 升级目录按需视图开关：仅节点升级窗口打开时构建/同步目录. */
+    public void setCatalogView(boolean enabled) {
+        catalogView = enabled;
+    }
+
     /** 回收站查看视图开关. */
     public void setRecycleView(boolean enabled) {
         recycleView = enabled;
@@ -646,17 +698,17 @@ public final class ContainerCloudworks extends MekanismContainer {
         CloudworksNetwork.CHANNEL.sendToServer(new CloudworksNetwork.Action(this, operation, line, node, value));
     }
 
-    public mekanism.api.qio.resource.QIOResourceDescriptor resourceChoice(UUID line, UUID node, int index) {
-        if (!java.util.Objects.equals(line, resourceLine) || !java.util.Objects.equals(node, resourceNode)
+    public QIOResourceDescriptor resourceChoice(UUID line, UUID node, int index) {
+        if (!Objects.equals(line, resourceLine) || !Objects.equals(node, resourceNode)
                 || index < 0 || index >= resourceChoices.size())
             throw new IllegalArgumentException("cloudworks.error.stale");
         return resourceChoices.get(index);
     }
 
     public void loadResources(UUID line, UUID node, String query, int offset) {
-        pendingResourceQuery = new mekanism.cloudworks.common.service.CloudworksResourceQuery(
+        pendingResourceQuery = new CloudworksResourceQuery(
                 CloudworksPlayerDataManager.INSTANCE.guiSource(ownerId()), line, node, query, offset);
-        resourceChoices = java.util.Collections.emptyList();
+        resourceChoices = Collections.emptyList();
         resourceOffset = resourceTotal = 0;
         resourceLine = line;
         resourceNode = node;
@@ -672,9 +724,9 @@ public final class ContainerCloudworks extends MekanismContainer {
     private void pumpResourceQuery() {
         if (resourceTask != null && resourceTask.isDone()) {
             try {
-                mekanism.cloudworks.common.service.CloudworksResourceQuery.Result result = resourceTask.get();
-                if (pendingResourceQuery == null && java.util.Objects.equals(resourceLine, runningResourceQuery.line)
-                        && java.util.Objects.equals(resourceNode, runningResourceQuery.context)) {
+                CloudworksResourceQuery.Result result = resourceTask.get();
+                if (pendingResourceQuery == null && Objects.equals(resourceLine, runningResourceQuery.line)
+                        && Objects.equals(resourceNode, runningResourceQuery.context)) {
                     resourceChoices = result.resources;
                     resourceOffset = result.offset;
                     resourceTotal = result.total;
@@ -682,7 +734,7 @@ public final class ContainerCloudworks extends MekanismContainer {
                 }
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
-            } catch (java.util.concurrent.ExecutionException | java.util.concurrent.CancellationException failure) {
+            } catch (ExecutionException | CancellationException failure) {
                 if (pendingResourceQuery == null) sendData("cloudworks.error.storage");
             } finally {
                 resourceTask = null;
@@ -690,7 +742,7 @@ public final class ContainerCloudworks extends MekanismContainer {
             }
         }
         if (resourceTask == null && pendingResourceQuery != null) {
-            java.util.concurrent.FutureTask<mekanism.cloudworks.common.service.CloudworksResourceQuery.Result> submitted =
+            FutureTask<CloudworksResourceQuery.Result> submitted =
                     CloudworksServerTickService.INSTANCE.submitResourceQuery(pendingResourceQuery);
             if (submitted != null) {
                 resourceTask = submitted;
@@ -705,8 +757,8 @@ public final class ContainerCloudworks extends MekanismContainer {
     }
 
     @Nullable
-    public mekanism.cloudworks.common.tile.TileEntityCloudDashboard dashboard() {
-        return host instanceof mekanism.cloudworks.common.tile.TileEntityCloudDashboard dashboard ? dashboard : null;
+    public TileEntityCloudDashboard dashboard() {
+        return host instanceof TileEntityCloudDashboard dashboard ? dashboard : null;
     }
 
     @Override
@@ -714,14 +766,14 @@ public final class ContainerCloudworks extends MekanismContainer {
         if (lifecycleClosed.get()) return false;
         if (player != owner) return false;
         if (host != null && !host.available()) return false;
-        if (host instanceof mekanism.cloudworks.common.tile.TileEntityCloudDashboard dashboard
+        if (host instanceof TileEntityCloudDashboard dashboard
                 && (player.world != dashboard.getWorld()
                 || player.getDistanceSq(dashboard.getPos()) > 64
                 || !player.world.isRemote && (cloudOwner == null
                     || !cloudOwner.equals(dashboard.getSecurity().getOwnerUUID())
-                    || !mekanism.common.util.SecurityUtils.canAccess(player, dashboard)))) return false;
+                    || !SecurityUtils.canAccess(player, dashboard)))) return false;
         if (player.world.isRemote) return true;
-        return enabled(player);
+        return teamTerminal ? CloudworksTeamContext.canAccess(player, cloudOwner) : enabled(player);
     }
 
     public boolean accepts(EntityPlayer player, int window, UUID token, long sequence) {
@@ -755,6 +807,20 @@ public final class ContainerCloudworks extends MekanismContainer {
         return speed ? guiData.overview.speedUpgradePool : guiData.overview.energyUpgradePool;
     }
 
+    /** Cloud custom upgrade entries for the upgrade window (8.5-B2); null while the on-demand view is closed. */
+    public List<CloudworksGuiData.CustomUpgrade> customUpgrades() {
+        return guiData.overview.customUpgrades;
+    }
+
+    /** Pool count of one custom type by namespaced id; 0 when absent or the catalogue is not loaded. */
+    public long customUpgradeCount(String id) {
+        List<CloudworksGuiData.CustomUpgrade> entries = guiData.overview.customUpgrades;
+        if (entries == null) return 0;
+        for (CloudworksGuiData.CustomUpgrade entry : entries)
+            if (entry.id.equals(id)) return entry.count;
+        return 0;
+    }
+
     public String status() {
         return status;
     }
@@ -767,14 +833,14 @@ public final class ContainerCloudworks extends MekanismContainer {
         return offset;
     }
 
-    public void sendAction(mekanism.cloudworks.common.network.CloudworksNetwork.Operation operation, UUID line, String name) {
-        mekanism.cloudworks.common.network.CloudworksNetwork.CHANNEL.sendToServer(
-                new mekanism.cloudworks.common.network.CloudworksNetwork.Action(this, operation, line, name));
+    public void sendAction(CloudworksNetwork.Operation operation, UUID line, String name) {
+        CloudworksNetwork.CHANNEL.sendToServer(
+                new CloudworksNetwork.Action(this, operation, line, name));
     }
 
-    public void sendNodeAction(mekanism.cloudworks.common.network.CloudworksNetwork.Operation operation, UUID line, UUID node) {
-        mekanism.cloudworks.common.network.CloudworksNetwork.CHANNEL.sendToServer(
-                new mekanism.cloudworks.common.network.CloudworksNetwork.Action(this, operation, line, node, ""));
+    public void sendNodeAction(CloudworksNetwork.Operation operation, UUID line, UUID node) {
+        CloudworksNetwork.CHANNEL.sendToServer(
+                new CloudworksNetwork.Action(this, operation, line, node, ""));
     }
 
     public UUID lineIdAt(int index) {
@@ -787,10 +853,20 @@ public final class ContainerCloudworks extends MekanismContainer {
         return index < 0 || index >= list.size() ? "" : list.get(index).name;
     }
 
-    public java.util.List<String> nodeLabels() {
-        java.util.List<String> values = new java.util.ArrayList<>();
-        for (CloudworksGuiData.Node node : guiData.graph.nodes) {
-            values.add(node.name + " x" + node.count + " " + node.state);
+    public List<String> nodeLabels() {
+        List<String> values = new ArrayList<>();
+        for (mekanism.cloudworks.common.network.data.node.Node node : guiData.graph.nodes) {
+            if (node instanceof mekanism.cloudworks.common.network.data.node.MachineNode) {
+                mekanism.cloudworks.common.network.data.node.MachineNode machine =
+                        (mekanism.cloudworks.common.network.data.node.MachineNode) node;
+                values.add(machine.machineIdentity + " x" + machine.count + " " + node.state);
+            } else if (node instanceof mekanism.cloudworks.common.network.data.node.AuxiliaryNode) {
+                values.add(((mekanism.cloudworks.common.network.data.node.AuxiliaryNode) node).auxiliaryItem + " " + node.state);
+            } else {
+                mekanism.cloudworks.common.network.data.node.ChannelNode channel =
+                        (mekanism.cloudworks.common.network.data.node.ChannelNode) node;
+                values.add((channel.archetypeId.isEmpty() ? "channel" : channel.archetypeId) + " " + node.state);
+            }
         }
         return values;
     }
@@ -800,7 +876,7 @@ public final class ContainerCloudworks extends MekanismContainer {
     }
 
     public UUID nodeIdAt(int nodeIndex) {
-        List<CloudworksGuiData.Node> nodes = guiData.graph.nodes;
+        List<mekanism.cloudworks.common.network.data.node.Node> nodes = guiData.graph.nodes;
         return nodeIndex < 0 || nodeIndex >= nodes.size() ? null : nodes.get(nodeIndex).id;
     }
 
@@ -826,6 +902,8 @@ public final class ContainerCloudworks extends MekanismContainer {
         CloudworksGuiSource source;
         try {
             source = CloudworksPlayerDataManager.INSTANCE.guiSource(ownerId());
+            if (teamTerminal) source = source.withTeam(
+                    CloudworksTeamManager.view(owner.getUniqueID()));
         } catch (RuntimeException error) {
             source = null;
             result = "cloudworks.error.storage";
@@ -837,7 +915,7 @@ public final class ContainerCloudworks extends MekanismContainer {
         pendingGuiRequestStatus = result;
         pendingGuiRequest = new CloudworksGuiRequest(source, offset, graphLine, cacheViewType, warehousesView,
                 recycleView, resourceChoices, resourceOffset, resourceTotal, resourceNode,
-                windowId, session, lastRequest, result);
+                windowId, session, lastRequest, result, catalogView);
         pumpGuiData();
     }
 
@@ -857,7 +935,7 @@ public final class ContainerCloudworks extends MekanismContainer {
                 }
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
-            } catch (java.util.concurrent.ExecutionException | java.util.concurrent.CancellationException failure) {
+            } catch (ExecutionException | CancellationException failure) {
                 status = "cloudworks.error.storage";
             } finally {
                 guiTask = null;
@@ -865,7 +943,7 @@ public final class ContainerCloudworks extends MekanismContainer {
             }
         }
         if (guiTask == null && pendingGuiRequest != null) {
-            java.util.concurrent.FutureTask<CloudworksGuiService.Result> submitted =
+            FutureTask<CloudworksGuiService.Result> submitted =
                     CloudworksServerTickService.INSTANCE.submitGui(pendingGuiRequest, sentDataGeneration + 1, lastSentData);
             if (submitted != null) {
                 sentDataGeneration++;
@@ -900,6 +978,7 @@ public final class ContainerCloudworks extends MekanismContainer {
         if (++pendingDataChunk != pendingDataChunks) return;
         session = token;
         guiData = pendingData;
+        if (teamTerminal && guiData.overview.team.id != null) cloudOwner = guiData.overview.team.id;
         pendingData = null;
         receivedDataGeneration = generation;
         receivedSequence = sequence;
@@ -914,6 +993,14 @@ public final class ContainerCloudworks extends MekanismContainer {
 
     public long sampleTick() {
         return sampleTick;
+    }
+
+    public boolean isTeamTerminal() {
+        return teamTerminal;
+    }
+
+    public EntityPlayer player() {
+        return owner;
     }
 
 }

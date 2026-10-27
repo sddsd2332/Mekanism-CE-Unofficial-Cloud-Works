@@ -19,8 +19,10 @@ import mekanism.cloudworks.client.gui.element.tab.GuiCloudRecycleTab;
 import mekanism.cloudworks.client.gui.element.tab.GuiCloudUpgradeTab;
 import mekanism.cloudworks.client.gui.element.tab.GuiCloudWarehousesTab;
 import mekanism.cloudworks.client.gui.element.tab.GuiCloudStatusTab;
+import mekanism.cloudworks.client.gui.element.tab.GuiCloudTeamTab;
 import mekanism.cloudworks.common.content.CloudworksWindowTypes;
 import mekanism.cloudworks.common.inventory.ContainerCloudworks;
+import mekanism.cloudworks.common.registries.CloudworksItems;
 import mekanism.cloudworks.common.network.CloudworksNetwork.Operation;
 import mekanism.cloudworks.common.network.data.CloudworksGuiData;
 import mekanism.common.util.LangUtils;
@@ -32,11 +34,16 @@ import net.minecraft.util.text.ITextComponent;
 import net.minecraft.util.text.TextComponentString;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
+import javax.annotation.Nullable;
+import mekanism.cloudworks.common.CloudworksCommonProxy;
+import mekanism.cloudworks.common.content.CloudworksTerminalHost;
+import mekanism.cloudworks.common.tile.TileEntityCloudDashboard;
+import org.lwjgl.input.Keyboard;
 
 /**
  * 云端总览屏（主 GUI 双屏结构的第一屏, 384×212, no player inventory): a QIO
  * crafting-monitor style production-line directory. Left edge carries the seven
- * cloud tabs (placeholder until batches B–E); the body lists every line with
+ * cloud tabs; the body lists every line with
  * its state, node count and energy; clicking a row selects it, double-clicking
  * (or 返回键 on a selected row) swaps to the full-screen line editor while the
  * shared container keeps syncing.
@@ -62,6 +69,7 @@ public final class GuiCloudworksCloud extends GuiMekanism<ContainerCloudworks> {
     private GuiCloudWarehousesTab warehousesTab;
     private GuiCloudRecycleTab recycleTab;
     private GuiCloudStatusTab statusTab;
+    private GuiCloudTeamTab teamTab;
     private GuiPlayerInventoryWindow inventoryWindow;
     private SelectedWindowData activeInventoryContext = CloudworksWindowTypes.CLOUD_CACHE_DATA;
     private boolean pinnedWindowsInitialized;
@@ -89,9 +97,17 @@ public final class GuiCloudworksCloud extends GuiMekanism<ContainerCloudworks> {
      * terminal path binds them to the held item. Mirrors the server-side
      * construction so vanilla slot sync lines up.
      */
-    public GuiCloudworksCloud(InventoryPlayer inventory, @javax.annotation.Nullable mekanism.cloudworks.common.tile.TileEntityCloudDashboard dashboard) {
-        this(new ContainerCloudworks(inventory, dashboard != null ? dashboard
-              : mekanism.cloudworks.common.CloudworksCommonProxy.heldTerminalHost(inventory.player)), inventory);
+    public GuiCloudworksCloud(InventoryPlayer inventory, @Nullable TileEntityCloudDashboard dashboard) {
+        this(createContainer(inventory, dashboard), inventory);
+    }
+
+    private static ContainerCloudworks createContainer(InventoryPlayer inventory,
+            @Nullable TileEntityCloudDashboard dashboard) {
+        if (dashboard != null) return new ContainerCloudworks(inventory, dashboard);
+        CloudworksTerminalHost host =
+                CloudworksCommonProxy.heldTerminalHost(inventory.player);
+        boolean team = inventory.player.getHeldItemMainhand().getItem() == CloudworksItems.TeamTerminal;
+        return new ContainerCloudworks(inventory, host, null, team);
     }
 
     /** Screen-swap form: reuses the already-open container so sync never breaks. */
@@ -121,6 +137,8 @@ public final class GuiCloudworksCloud extends GuiMekanism<ContainerCloudworks> {
         warehousesTab = addButton(new GuiCloudWarehousesTab(this, 84, container, () -> warehousesTab));
         recycleTab = addButton(new GuiCloudRecycleTab(this, 110, container, () -> recycleTab));
         statusTab = addButton(new GuiCloudStatusTab(this, 136, container, () -> statusTab));
+        if (container.isTeamTerminal())
+            teamTab = addButton(new GuiCloudTeamTab(this, 6, container, () -> teamTab));
         setTabsReady();
         GuiEnergyTab energyStatusTab = new GuiEnergyTab(this, this::getEnergyTabText);
         energyStatusTab.move(0, 25);
@@ -145,6 +163,8 @@ public final class GuiCloudworksCloud extends GuiMekanism<ContainerCloudworks> {
         warehousesTab.active = ready && getWindows().stream().noneMatch(window -> window instanceof GuiCloudWarehousesWindow);
         recycleTab.active = ready && getWindows().stream().noneMatch(window -> window instanceof GuiCloudRecycleWindow);
         statusTab.active = ready && getWindows().stream().noneMatch(window -> window instanceof GuiCloudStatusWindow);
+        if (teamTab != null)
+            teamTab.active = ready && getWindows().stream().noneMatch(window -> window instanceof GuiCloudTeamWindow);
     }
 
     @Override
@@ -249,32 +269,32 @@ public final class GuiCloudworksCloud extends GuiMekanism<ContainerCloudworks> {
     }
 
     private void openUpgradeWindow() {
-        for (mekanism.client.gui.element.window.GuiWindow window : new ArrayList<>(getWindows()))
+        for (GuiWindow window : new ArrayList<>(getWindows()))
             if (window instanceof GuiCloudUpgradeWindow) { focusWindow(window); return; }
         addWindow(new GuiCloudUpgradeWindow(this, (width - 220) / 2 - guiLeft, 8, container));
     }
 
     private void openEnergyWindow() {
-        for (mekanism.client.gui.element.window.GuiWindow window : new ArrayList<>(getWindows()))
+        for (GuiWindow window : new ArrayList<>(getWindows()))
             if (window instanceof GuiCloudEnergyWindow) { focusWindow(window); return; }
         addWindow(new GuiCloudEnergyWindow(this, (width - 300) / 2 - guiLeft, 8, container));
     }
 
     private void openRecycleWindow() {
-        for (mekanism.client.gui.element.window.GuiWindow window : new ArrayList<>(getWindows()))
+        for (GuiWindow window : new ArrayList<>(getWindows()))
             if (window instanceof GuiCloudRecycleWindow) { focusWindow(window); return; }
         addWindow(new GuiCloudRecycleWindow(this, (width - 250) / 2 - guiLeft, 8, container));
     }
 
     private void openCacheWindow() {
-        for (mekanism.client.gui.element.window.GuiWindow window : new ArrayList<>(getWindows()))
+        for (GuiWindow window : new ArrayList<>(getWindows()))
             if (window instanceof GuiCloudCacheWindow) { focusWindow(window); return; }
         GuiCloudCacheWindow window = new GuiCloudCacheWindow(this, (width - 344) / 2 - guiLeft, 8, container);
         addWindow(window);
     }
 
     private void openWarehousesWindow() {
-        for (mekanism.client.gui.element.window.GuiWindow window : new ArrayList<>(getWindows()))
+        for (GuiWindow window : new ArrayList<>(getWindows()))
             if (window instanceof GuiCloudWarehousesWindow) { focusWindow(window); return; }
         addWindow(new GuiCloudWarehousesWindow(this, (width - 344) / 2 - guiLeft, 8, container));
     }
@@ -284,8 +304,8 @@ public final class GuiCloudworksCloud extends GuiMekanism<ContainerCloudworks> {
     }
 
     private static boolean isShiftHeld() {
-        return org.lwjgl.input.Keyboard.isKeyDown(org.lwjgl.input.Keyboard.KEY_LSHIFT)
-              || org.lwjgl.input.Keyboard.isKeyDown(org.lwjgl.input.Keyboard.KEY_RSHIFT);
+        return Keyboard.isKeyDown(Keyboard.KEY_LSHIFT)
+              || Keyboard.isKeyDown(Keyboard.KEY_RSHIFT);
     }
 
     private void cycleFilter() {

@@ -39,6 +39,7 @@ public final class CloudworksPortBinding {
         mounting = true;
         try {
             boolean fresh = id == null;
+            boolean changedBeforeMount = dirty;
             UUID currentStorage = manager.storageId();
             UUID candidate = fresh ? UUID.randomUUID() : id;
             if (!fresh && !currentStorage.equals(storage)) return false;
@@ -49,8 +50,8 @@ public final class CloudworksPortBinding {
             liveSlots = slots;
             liveTanks = tanks;
             liveEnergy = energy;
-            restore(slots, tanks, setEnergy);
-            dirty = fresh;
+            restore(slots, tanks, energy, setEnergy);
+            dirty = fresh || changedBeforeMount;
             capturedVersion = version;
             return true;
         } catch (RuntimeException unavailable) {
@@ -73,9 +74,14 @@ public final class CloudworksPortBinding {
         } finally { restoring = false; }
     }
 
-    private void restore(List<IInventorySlot> slots, List<CloudworksHybridTank> tanks, DoubleConsumer setEnergy) {
+    private void restore(List<IInventorySlot> slots, List<CloudworksHybridTank> tanks, DoubleSupplier energy,
+            DoubleConsumer setEnergy) {
         restoring = true;
-        try { record.restore(slots, tanks); setEnergy.accept(record.energy()); }
+        try {
+            double currentEnergy = energy.getAsDouble();
+            record.restoreMerged(slots, tanks);
+            setEnergy.accept(Math.max(currentEnergy, record.energy()));
+        }
         finally { restoring = false; }
     }
 
@@ -95,6 +101,10 @@ public final class CloudworksPortBinding {
 
     public void flush() {
         if (liveSlots != null) saveNow(liveSlots, liveTanks, liveEnergy);
+    }
+
+    public void capture() {
+        if (liveSlots != null) refresh(liveSlots, liveTanks, liveEnergy);
     }
 
     public void detach(List<IInventorySlot> slots, List<CloudworksHybridTank> tanks, DoubleSupplier energy) {

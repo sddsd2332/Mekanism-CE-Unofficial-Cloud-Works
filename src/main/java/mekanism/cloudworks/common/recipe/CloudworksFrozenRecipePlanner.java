@@ -6,11 +6,12 @@ import mekanism.cloudworks.common.data.CloudworksResourceStack;
 import mekanism.cloudworks.common.data.MachineNodeData;
 import mekanism.cloudworks.common.registry.CloudworksRegistries;
 import mekanism.cloudworks.common.service.CloudworksResourceCapacity;
-import mekanism.cloudworks.common.slot.MachineSlotLayout;
+import mekanism.cloudworks.api.machine.MachineSlotLayout;
 import net.minecraft.util.ResourceLocation;
 
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import mekanism.cloudworks.common.service.CloudworksQuantities;
 
 /**
  * Captures a native-free planning job; only the caller applies its result on the owner thread.
@@ -31,7 +32,7 @@ public final class CloudworksFrozenRecipePlanner {
         Map<ResourceLocation, Long> room = new TreeMap<>();
         for (MachineSlotLayout.Slot slot : layout.slots())
             if (slot.role() == MachineSlotLayout.PortRole.OUTPUT)
-                room.merge(slot.codecId(), mekanism.cloudworks.common.service.CloudworksQuantities.multiplyLimit(slot.capacity(), node.machineCount()), mekanism.cloudworks.common.service.CloudworksQuantities::addLimit);
+                room.merge(slot.codecId(), CloudworksQuantities.multiplyLimit(slot.capacity(), node.machineCount()), CloudworksQuantities::addLimit);
         for (CloudworksResourceStack stack : node.outputs())
             room.merge(stack.descriptor().getCodecId(), -stack.amount(), Math::addExact);
         return new Request(node.nodeId(), node.machineCount(), machineIdentity(node),

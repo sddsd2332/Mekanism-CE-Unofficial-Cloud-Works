@@ -1,0 +1,15 @@
+{
+  "type": "forge:ore_shaped",
+  "pattern": [
+    "APA",
+    "PDP",
+    "ACA"
+  ],
+  "key": {
+    "A": { "item": "mekanism:enrichedalloy" },
+    "P": { "item": "minecraft:piston" },
+    "D": { "item": "mekanism:basicblock", "data": 9 },
+    "C": { "item": "mekanism:controlcircuit", "data": 3 }
+  },
+  "result": { "item": "cloudworks:team_cloudworks_recovery" }
+}

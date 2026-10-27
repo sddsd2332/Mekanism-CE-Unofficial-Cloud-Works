@@ -1,11 +1,12 @@
 package mekanism.cloudworks.common.service;
 
-import mekanism.cloudworks.api.CloudworksUploadReservation;
-import mekanism.cloudworks.api.ICloudworksUploadSource;
+import mekanism.cloudworks.api.transfer.CloudworksUploadReservation;
+import mekanism.cloudworks.api.transfer.ICloudworksUploadSource;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
 
 import java.util.*;
+import mekanism.common.Mekanism;
 
 /**
  * The first real {@link ICloudworksUploadSource}: the player's own inventory
@@ -169,8 +170,9 @@ public final class CloudworksPlayerInventorySource implements ICloudworksUploadS
         }
         if (remaining > 0) {
             shortfalls++;
-            System.err.println("CLOUDWORKS-DEBIT shortfall transfer=" + transferId
-                    + " missing=" + remaining + " machine=" + plan.template.getItem().getRegistryName());
+            Mekanism.logger.warn(
+                    "Cloudworks debit shortfall transfer={} missing={} machine={}", transferId, remaining,
+                    plan.template.getItem().getRegistryName());
         }
         if (changeNotifier != null) changeNotifier.run();
         return remaining;   // >0 keeps the durable entry alive for retry and audit

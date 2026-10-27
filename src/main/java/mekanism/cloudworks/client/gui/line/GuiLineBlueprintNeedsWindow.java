@@ -9,6 +9,7 @@ import mekanism.cloudworks.common.network.PacketCloudworksBlueprint;
 import mekanism.cloudworks.common.service.CloudworksPlayerDataManager.BlueprintRequirement;
 import mekanism.common.inventory.ISlotClickHandler.IScrollableSlot;
 import net.minecraft.util.text.TextComponentString;
+import mekanism.common.util.LangUtils;
 
 public final class GuiLineBlueprintNeedsWindow extends GuiLineWindow {
     private final ContainerCloudworks container;
@@ -51,7 +52,7 @@ public final class GuiLineBlueprintNeedsWindow extends GuiLineWindow {
         for (BlueprintRequirement requirement : requirements) if (!missing || requirement.missing > 0) shown.add(requirement);
         if (index < 0 || index >= shown.size()) return Collections.emptyList();
         BlueprintRequirement requirement = shown.get(index);
-        return Collections.singletonList(mekanism.common.util.LangUtils.localizeWithFormat(
+        return Collections.singletonList(LangUtils.localizeWithFormat(
                 "cloudworks.editor.blueprint_requirement", requirement.required, requirement.missing));
     }
     @Override public void tick() {
@@ -60,7 +61,7 @@ public final class GuiLineBlueprintNeedsWindow extends GuiLineWindow {
             version = container.blueprintVersion();
             PacketCloudworksBlueprint.Result result = container.blueprintResult;
             if (!result.error.isEmpty()) {
-                feedback = mekanism.common.util.LangUtils.localize(result.error);
+                feedback = LangUtils.localize(result.error);
                 if (result.operation == PacketCloudworksBlueprint.CANCEL) {
                     confirmed = false;
                     cancel.setMessage(new TextComponentString(tr("blueprint_cancel")));

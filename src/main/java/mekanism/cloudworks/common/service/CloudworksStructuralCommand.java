@@ -1,6 +1,7 @@
 package mekanism.cloudworks.common.service;
 
 import java.util.UUID;
+
 import mekanism.api.qio.resource.QIOResourceDescriptor;
 import mekanism.cloudworks.common.data.MachineNodeData;
 import mekanism.cloudworks.common.data.ProductionLineData;
@@ -8,6 +9,9 @@ import mekanism.cloudworks.common.data.ProductionLineLink;
 import mekanism.cloudworks.common.network.CloudworksNetwork.Operation;
 import mekanism.cloudworks.common.util.CloudworksMessages;
 import net.minecraft.item.ItemStack;
+import java.util.Collections;
+import java.util.function.BiFunction;
+import mekanism.api.qio.resource.QIOResourceCodecs;
 
 /**
  * One immutable structural edit captured on the server thread and applied on
@@ -26,11 +30,17 @@ public final class CloudworksStructuralCommand {
     final UUID line, node;
     final String value;
     final long revision;
-    /** Captured FILTER_LINK_CHOICE answer (main-thread container query). */
+    /**
+     * Captured FILTER_LINK_CHOICE answer (main-thread container query).
+     */
     final QIOResourceDescriptor choice;
-    /** Captured FILTER_LINK_HELD main-hand descriptor. */
+    /**
+     * Captured FILTER_LINK_HELD main-hand descriptor.
+     */
     final QIOResourceDescriptor held;
-    /** Result of CREATE, for the main-thread container hop. */
+    /**
+     * Result of CREATE, for the main-thread container hop.
+     */
     UUID created;
 
     private CloudworksStructuralCommand(UUID owner, Operation operation, UUID line, UUID node,
@@ -53,14 +63,14 @@ public final class CloudworksStructuralCommand {
      */
     public static CloudworksStructuralCommand capture(UUID owner, Operation operation, UUID line, UUID node,
                                                       String value, long revision,
-                                                      java.util.function.BiFunction<UUID, UUID, QIOResourceDescriptor> choiceLookup,
+                                                      BiFunction<UUID, UUID, QIOResourceDescriptor> choiceLookup,
                                                       ItemStack heldStack) {
         QIOResourceDescriptor choice = null, held = null;
         if (operation == Operation.FILTER_LINK_CHOICE)
             choice = choiceLookup.apply(line, node);
         if (operation == Operation.FILTER_LINK_HELD) {
             if (heldStack.isEmpty()) return null;
-            held = mekanism.api.qio.resource.QIOResourceCodecs.item(heldStack);
+            held = QIOResourceCodecs.item(heldStack);
         }
         return new CloudworksStructuralCommand(owner, operation, line, node, value, revision, choice, held);
     }
@@ -71,19 +81,36 @@ public final class CloudworksStructuralCommand {
      */
     public static boolean asynchronous(Operation operation) {
         switch (operation) {
-            case CREATE: case START: case STOP: case RENAME: case DELETE:
-            case LINK: case UNLINK: case REMOVE_NODE: case MOVE_NODE: case TOGGLE_NODE:
-            case UPDATE_LINK: case FILTER_LINK_CHOICE: case FILTER_LINK_HELD: case FILTER_LINK_CLEAR:
-            case RETURN_CACHE: case CLEAR_NODE_CACHE:
-            case INSTALL_UPGRADE: case REMOVE_SPEED: case REMOVE_ENERGY:
-            case LINE_FLOW: case LINE_OFFLINE:
+            case CREATE:
+            case START:
+            case STOP:
+            case RENAME:
+            case DELETE:
+            case LINK:
+            case UNLINK:
+            case REMOVE_NODE:
+            case MOVE_NODE:
+            case TOGGLE_NODE:
+            case UPDATE_LINK:
+            case FILTER_LINK_CHOICE:
+            case FILTER_LINK_HELD:
+            case FILTER_LINK_CLEAR:
+            case RETURN_CACHE:
+            case CLEAR_NODE_CACHE:
+            case INSTALL_UPGRADE:
+            case REMOVE_SPEED:
+            case REMOVE_ENERGY:
+            case LINE_FLOW:
+            case LINE_OFFLINE:
                 return true;
             default:
                 return false;
         }
     }
 
-    /** Line to select in the container after success (CREATE result, or null). */
+    /**
+     * Line to select in the container after success (CREATE result, or null).
+     */
     public UUID createdLine() {
         return created;
     }
@@ -95,80 +122,84 @@ public final class CloudworksStructuralCommand {
     public String apply(CloudworksPlayerDataManager manager) {
         try {
             synchronized (manager.ownerLock(owner)) {
-            if (manager.commandRevision(owner) != revision) return "cloudworks.error.stale";
-            boolean applied = true;
-            switch (operation) {
-                case CREATE -> created = manager.createLine(owner).lineId();
-                case START -> applied = manager.toggleLine(owner, line, true);
-                case STOP -> applied = manager.toggleLine(owner, line, false);
-                case LINE_OFFLINE -> {
-                    if (!"1".equals(value) && !"0".equals(value)) throw error();
-                    manager.setRunWhileOwnerOffline(owner, line, "1".equals(value));
-                }
-                case RENAME -> applied = manager.renameLine(owner, line, value);
-                case DELETE -> applied = manager.deleteLine(owner, line);
-                case LINK -> {
-                    LinkSpec link = LinkSpec.parse(value);
-                    manager.addLink(owner, line, link.sourceNode, link.sourcePort,
-                            link.targetNode, link.targetPort, link.priority, link.ratio);
-                }
-                case UNLINK -> applied = manager.removeLink(owner, line, UUID.fromString(value.trim()));
-                case REMOVE_NODE -> manager.removeNode(owner, line, node);
-                case RETURN_CACHE -> manager.returnCache(owner, line, node);
-                case CLEAR_NODE_CACHE -> manager.clearNodeCache(owner, line, node);
-                case INSTALL_UPGRADE -> {
-                    boolean speed;
-                    if ("speed".equalsIgnoreCase(value)) speed = true;
-                    else if ("energy".equalsIgnoreCase(value)) speed = false;
-                    else return "cloudworks.error.editor";
-                    manager.installUpgradeFromPool(owner, line, speed);
-                }
-                case REMOVE_SPEED -> manager.removeUpgradeToPool(owner, line, true);
-                case REMOVE_ENERGY -> manager.removeUpgradeToPool(owner, line, false);
-                case LINE_FLOW -> manager.edit(owner, line, target -> {
-                    // Read-modify-write inside the edit lambda: the flow values
-                    // derive from the same locked snapshot that applies them.
-                    boolean receiving = target.energyFlowReceivingToLine();
-                    boolean sending = target.energyFlowLineToSending();
-                    for (String segment : value.split(";")) {
-                        String[] pair = segment.split("=", 2);
-                        if (pair.length == 2 && "r2l".equals(pair[0])) receiving = "1".equals(pair[1]);
-                        if (pair.length == 2 && "l2s".equals(pair[0])) sending = "1".equals(pair[1]);
+                if (manager.commandRevision(owner) != revision) return "cloudworks.error.stale";
+                boolean applied = true;
+                switch (operation) {
+                    case CREATE -> created = manager.createLine(owner).lineId();
+                    case START -> applied = manager.toggleLine(owner, line, true);
+                    case STOP -> applied = manager.toggleLine(owner, line, false);
+                    case LINE_OFFLINE -> {
+                        if (!"1".equals(value) && !"0".equals(value)) throw error();
+                        manager.setRunWhileOwnerOffline(owner, line, "1".equals(value));
                     }
-                    target.setEnergyFlows(receiving, sending);
-                });
-                case MOVE_NODE -> manager.edit(owner, line, target -> {
-                    String[] xy = value.split(",");
-                    int x = coordinate(xy[0]), z = coordinate(xy[1]);
-                    MachineNodeData machineNode = machine(target, node);
-                    if (machineNode != null) machineNode.setPosition(x, z);
-                    else throw error();
-                });
-                case TOGGLE_NODE -> manager.edit(owner, line, target -> {
-                    MachineNodeData machineNode = machine(target, node);
-                    if (machineNode == null) throw error();
-                    machineNode.setActive(!machineNode.active());
-                });
-                case FILTER_LINK_CHOICE, FILTER_LINK_HELD, FILTER_LINK_CLEAR -> manager.edit(owner, line, target -> {
-                    ProductionLineLink selected = link(target, node);
-                    if (selected == null) throw error();
-                    if (operation == Operation.FILTER_LINK_CLEAR) selected.setResourceFilters(java.util.Collections.emptyList());
-                    else if (operation == Operation.FILTER_LINK_CHOICE) selected.addResourceFilter(choice);
-                    else selected.addResourceFilter(held);
-                });
-                case UPDATE_LINK -> manager.edit(owner, line, target -> {
-                    ProductionLineLink selected = link(target, node);
-                    if (selected == null) throw error();
-                    String[] parts = value.split(",");
-                    double ratio = Double.parseDouble(parts[1]);
-                    if (!Double.isFinite(ratio) || ratio < 0 || ratio > 1) throw error();
-                    selected.setPriority(Integer.parseInt(parts[0]));
-                    selected.setRatio(ratio);
-                });
-                default -> throw error();
-            }
-            if (!applied) return "cloudworks.error.not_found";
-            return CloudworksMessages.SAVED;
+                    case RENAME -> applied = manager.renameLine(owner, line, value);
+                    case DELETE -> applied = manager.deleteLine(owner, line);
+                    case LINK -> {
+                        LinkSpec link = LinkSpec.parse(value);
+                        manager.addLink(owner, line, link.sourceNode, link.sourcePort,
+                                link.targetNode, link.targetPort, link.priority, link.ratio);
+                    }
+                    case UNLINK -> applied = manager.removeLink(owner, line, UUID.fromString(value.trim()));
+                    case REMOVE_NODE -> manager.removeNode(owner, line, node);
+                    case RETURN_CACHE -> manager.returnCache(owner, line, node);
+                    case CLEAR_NODE_CACHE -> manager.clearNodeCache(owner, line, node);
+                    case INSTALL_UPGRADE -> {
+                        boolean speed;
+                        if ("speed".equalsIgnoreCase(value)) speed = true;
+                        else if ("energy".equalsIgnoreCase(value)) speed = false;
+                        else return "cloudworks.error.editor";
+                        manager.installUpgradeFromPool(owner, line, speed);
+                    }
+                    case REMOVE_SPEED, REMOVE_ENERGY -> {
+                        if (value.indexOf(':') >= 0) return "cloudworks.error.editor";
+                        manager.removeUpgradeToPool(owner, line, operation == Operation.REMOVE_SPEED);
+                    }
+                    case LINE_FLOW -> manager.edit(owner, line, target ->
+                            // 统一闸门线协议(8.4): 键值在 CloudworksFlowGate 声明，未知键忽略，
+                            // 未提及的门保持同一锁定快照的当前值；写入走统一视图。
+                            target.flowGates().applyWire(value));
+                    case MOVE_NODE -> manager.edit(owner, line, target -> {
+                        String[] xy = value.split(",");
+                        int x = coordinate(xy[0]), z = coordinate(xy[1]);
+                        MachineNodeData machineNode = machine(target, node);
+                        if (machineNode != null) machineNode.setPosition(x, z);
+                        else throw error();
+                    });
+                    case TOGGLE_NODE -> manager.edit(owner, line, target -> {
+                        MachineNodeData machineNode = machine(target, node);
+                        if (machineNode == null) throw error();
+                        machineNode.setActive(!machineNode.active());
+                    });
+                    case FILTER_LINK_CHOICE, FILTER_LINK_HELD, FILTER_LINK_CLEAR ->
+                            manager.edit(owner, line, target -> {
+                                ProductionLineLink selected = link(target, node);
+                                if (selected == null) throw error();
+                                if (operation == Operation.FILTER_LINK_CLEAR)
+                                    selected.setResourceFilters(Collections.emptyList());
+                                else if (operation == Operation.FILTER_LINK_CHOICE) selected.addResourceFilter(choice);
+                                else selected.addResourceFilter(held);
+                            });
+                    case UPDATE_LINK -> manager.edit(owner, line, target -> {
+                        ProductionLineLink selected = link(target, node);
+                        if (selected == null) throw error();
+                        String[] parts = value.split(",");
+                        if (parts.length != 2) throw error();
+                        double ratio;
+                        int priority;
+                        try {
+                            priority = Integer.parseInt(parts[0].trim());
+                            ratio = Double.parseDouble(parts[1].trim());
+                        } catch (NumberFormatException malformed) {
+                            throw error();
+                        }
+                        if (!Double.isFinite(ratio) || ratio < 0 || ratio > 1) throw error();
+                        selected.setPriority(priority);
+                        selected.setRatio(ratio);
+                    });
+                    default -> throw error();
+                }
+                if (!applied) return "cloudworks.error.not_found";
+                return CloudworksMessages.SAVED;
             }
         } catch (RuntimeException failure) {
             // Broader than the old synchronous catch: an unexpected storage
@@ -189,7 +220,12 @@ public final class CloudworksStructuralCommand {
     }
 
     private static int coordinate(String value) {
-        int number = Integer.parseInt(value);
+        int number;
+        try {
+            number = Integer.parseInt(value.trim());
+        } catch (NumberFormatException malformed) {
+            throw error();
+        }
         if (Math.abs((long) number) > 1000000) throw error();
         return number;
     }
@@ -215,13 +251,17 @@ public final class CloudworksStructuralCommand {
         }
 
         static LinkSpec parse(String value) {
-            String[] parts = value == null ? new String[0] : value.split("\\|", -1);
-            if (parts.length < 4) throw new IllegalArgumentException("cloudworks.error.link_format");
-            int priority = parts.length > 4 ? Integer.parseInt(parts[4]) : 0;
-            double ratio = parts.length > 5 ? Double.parseDouble(parts[5]) : 1D;
-            if (!Double.isFinite(ratio) || ratio < 0D || ratio > 1D)
-                throw new IllegalArgumentException("cloudworks.error.link_format");
-            return new LinkSpec(UUID.fromString(parts[0]), parts[1], UUID.fromString(parts[2]), parts[3], priority, ratio);
+            try {
+                String[] parts = value == null ? new String[0] : value.split("\\|", -1);
+                if (parts.length < 4 || parts.length > 6) throw error();
+                int priority = parts.length > 4 ? Integer.parseInt(parts[4].trim()) : 0;
+                double ratio = parts.length > 5 ? Double.parseDouble(parts[5].trim()) : 1D;
+                if (!Double.isFinite(ratio) || ratio < 0D || ratio > 1D) throw error();
+                return new LinkSpec(UUID.fromString(parts[0].trim()), parts[1],
+                        UUID.fromString(parts[2].trim()), parts[3], priority, ratio);
+            } catch (IllegalArgumentException malformed) {
+                throw new IllegalArgumentException("cloudworks.error.link_format", malformed);
+            }
         }
     }
 }

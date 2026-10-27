@@ -17,6 +17,8 @@ import net.minecraftforge.fml.common.network.simpleimpl.MessageContext;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 import io.netty.buffer.ByteBuf;
+import net.minecraft.client.Minecraft;
+import net.minecraft.entity.player.EntityPlayer;
 
 /** Only an open, accessible port container may configure its QIO resource markers. */
 public final class PacketCloudworksPortQIO {
@@ -106,7 +108,7 @@ public final class PacketCloudworksPortQIO {
                 CloudworksNetwork.CHANNEL.sendTo(new State(request.window, port.getQIOFilters(),
                         choices, offset, total), player);
                 if (changed) {
-                    for (net.minecraft.entity.player.EntityPlayer viewer : port.playersUsing) {
+                    for (EntityPlayer viewer : port.playersUsing) {
                         if (viewer != player && viewer instanceof EntityPlayerMP serverViewer
                                 && viewer.openContainer instanceof MekanismTileContainer<?> other
                                 && other.getTileEntity() == port && other.canInteractWith(viewer))
@@ -180,8 +182,8 @@ public final class PacketCloudworksPortQIO {
     public static final class StateHandler implements IMessageHandler<State, IMessage> {
         @SideOnly(Side.CLIENT)
         private static void apply(State state) {
-            net.minecraft.client.Minecraft.getMinecraft().addScheduledTask(() -> {
-                net.minecraft.entity.player.EntityPlayer player = net.minecraft.client.Minecraft.getMinecraft().player;
+            Minecraft.getMinecraft().addScheduledTask(() -> {
+                EntityPlayer player = Minecraft.getMinecraft().player;
                 if (player != null && player.openContainer instanceof MekanismTileContainer<?> container
                         && container.windowId == state.window
                         && container.getTileEntity() instanceof TileEntityCloudworksPort port)

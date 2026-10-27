@@ -1,7 +1,7 @@
 package mekanism.cloudworks.common.data;
 
 import mekanism.api.qio.resource.QIOResourceDescriptor;
-import mekanism.cloudworks.api.CloudworksWarehouseCaps;
+import mekanism.cloudworks.api.transfer.CloudworksWarehouseCaps;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.nbt.NBTTagList;
 import net.minecraftforge.common.util.Constants.NBT;
@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Comparator;
+import java.math.BigInteger;
 
 /**
  * Owner-thread inventory. Callers must serialize transfers at the cloud boundary.
@@ -20,22 +21,39 @@ import java.util.Comparator;
  * resource type may be stored, independent of other types. Content above a cap
  * (a lowered cap, or legacy data) stays readable — QIO over-capacity semantics —
  * but nothing more of that type enters until extraction brings it back within
- * the cap. The total capacity remains a separate, coarser bound.</p>
+ * the cap. The total capacity remains a separate, coarser bound for ordinary
+ * inventories. Recovery stores can opt into independent descriptor capacities.</p>
  */
 public final class CloudworksInventory {
     private static final int PAGE_COUNT = 256;
     private final Page[] pages;
+    private final boolean perResourceCapacity;
+    private BigInteger resourceTotal = BigInteger.ZERO;
     private long capacity;
     private long total, nextOrder;
 
     public CloudworksInventory(long capacity) {
+        this(capacity, false);
+    }
+
+    private CloudworksInventory(long capacity, boolean perResourceCapacity) {
         if (capacity < 0) throw new IllegalArgumentException("Negative inventory capacity");
         this.capacity = capacity;
+        this.perResourceCapacity = perResourceCapacity;
         pages = new Page[PAGE_COUNT];
     }
 
+    /** Independent descriptor counters: one full resource cannot occupy another resource's room. */
+    public static CloudworksInventory perResourceCapacity(long capacity) {
+        return new CloudworksInventory(capacity, true);
+    }
+
+    public boolean hasPerResourceCapacity() { return perResourceCapacity; }
+
     private CloudworksInventory(CloudworksInventory source) {
         capacity = source.capacity;
+        perResourceCapacity = source.perResourceCapacity;
+        resourceTotal = source.resourceTotal;
         total = source.total;
         nextOrder = source.nextOrder;
         pages = source.pages.clone();
@@ -57,7 +75,8 @@ public final class CloudworksInventory {
         CloudworksDataChecks.fields(tag, 4, "capacity");
 
         CloudworksDataChecks.schema(tag, 1);
-        CloudworksInventory inventory = new CloudworksInventory(tag.getLong("capacity"));
+        CloudworksInventory inventory = new CloudworksInventory(tag.getLong("capacity"),
+                tag.getBoolean("perResourceCapacity"));
         NBTTagList entries = CloudworksDataChecks.list(tag, "contents", NBT.TAG_COMPOUND);
         long total = 0;
         for (int i = 0; i < entries.tagCount(); i++) {
@@ -69,8 +88,11 @@ public final class CloudworksInventory {
             QIOResourceDescriptor descriptor = CloudworksDataChecks.descriptor(value.getCompoundTag("descriptor"));
             if (inventory.amount(descriptor) != 0)
                 throw new IllegalArgumentException("Invalid duplicate inventory entry");
+            if (inventory.perResourceCapacity) {
+                if (amount > inventory.capacity) throw new IllegalArgumentException("Inventory exceeds per-resource capacity");
+                inventory.resourceTotal = inventory.resourceTotal.add(BigInteger.valueOf(amount));
+            } else total = Math.addExact(total, amount);
             inventory.put(descriptor, amount);
-            total = Math.addExact(total, amount);
         }
         if (total > inventory.capacity) throw new IllegalArgumentException("Inventory exceeds capacity");
         inventory.total = total;
@@ -99,15 +121,26 @@ public final class CloudworksInventory {
     }
 
     public long total() {
+        if (perResourceCapacity)
+            return resourceTotal.min(BigInteger.valueOf(Long.MAX_VALUE)).longValue();
         return total;
     }
 
     public long room() {
+        if (perResourceCapacity) return capacity;
         return capacity - total();
     }
 
+    public long room(QIOResourceDescriptor descriptor) {
+        return perResourceCapacity ? capacity - amount(descriptor) : room();
+    }
+
     public void setCapacity(long capacity) {
-        if (capacity < total()) throw new IllegalArgumentException("Capacity below stored amount");
+        if (capacity < 0) throw new IllegalArgumentException("Negative inventory capacity");
+        if (perResourceCapacity) {
+            for (long amount : snapshot().values())
+                if (capacity < amount) throw new IllegalArgumentException("Capacity below stored amount");
+        } else if (capacity < total()) throw new IllegalArgumentException("Capacity below stored amount");
         this.capacity = capacity;
     }
 
@@ -115,17 +148,27 @@ public final class CloudworksInventory {
      * How much of this resource type could be accepted right now (ask before moving).
      */
     public long insertable(QIOResourceDescriptor descriptor, long amount) {
+        return insertable(descriptor, amount, CloudworksWarehouseCaps.capOf(
+                descriptor == null ? "" : descriptor.getFamily()));
+    }
+
+    public long insertable(QIOResourceDescriptor descriptor, long amount, long itemTypeCap) {
         if (descriptor == null || amount < 0) throw new IllegalArgumentException("Invalid insertable query");
-        long perTypeRoom = CloudworksWarehouseCaps.capOf(descriptor.getFamily()) - amount(descriptor);
-        return Math.max(0L, Math.min(amount, Math.min(room(), perTypeRoom)));
+        long perTypeRoom = CloudworksWarehouseCaps.capOf(descriptor.getFamily(), itemTypeCap) - amount(descriptor);
+        return Math.max(0L, Math.min(amount, Math.min(room(descriptor), perTypeRoom)));
     }
 
     public long insert(QIOResourceDescriptor descriptor, long amount) {
+        return insert(descriptor, amount, CloudworksWarehouseCaps.capOf(
+                descriptor == null ? "" : descriptor.getFamily()));
+    }
+
+    public long insert(QIOResourceDescriptor descriptor, long amount, long itemTypeCap) {
         if (descriptor == null || amount < 0) throw new IllegalArgumentException("Invalid insert");
-        long accepted = insertable(descriptor, amount);
+        long accepted = insertable(descriptor, amount, itemTypeCap);
         if (accepted > 0) {
             put(descriptor, Math.addExact(amount(descriptor), accepted));
-            total = Math.addExact(total, accepted);
+            addTotal(accepted);
         }
         return accepted;
     }
@@ -138,10 +181,10 @@ public final class CloudworksInventory {
      */
     public long insertIgnoringTypeCap(QIOResourceDescriptor descriptor, long amount) {
         if (descriptor == null || amount < 0) throw new IllegalArgumentException("Invalid restore");
-        long accepted = Math.min(amount, Math.min(room(), Long.MAX_VALUE - amount(descriptor)));
+        long accepted = Math.min(amount, Math.min(room(descriptor), Long.MAX_VALUE - amount(descriptor)));
         if (accepted > 0) {
             put(descriptor, Math.addExact(amount(descriptor), accepted));
-            total = Math.addExact(total, accepted);
+            addTotal(accepted);
         }
         return accepted;
     }
@@ -152,7 +195,7 @@ public final class CloudworksInventory {
         if (taken > 0) {
             long left = amount(descriptor) - taken;
             put(descriptor, left);
-            total -= taken;
+            addTotal(-taken);
         }
         return taken;
     }
@@ -174,6 +217,7 @@ public final class CloudworksInventory {
         NBTTagCompound tag = new NBTTagCompound();
         tag.setInteger("schema", 1);
         tag.setLong("capacity", capacity);
+        if (perResourceCapacity) tag.setBoolean("perResourceCapacity", true);
         NBTTagList entries = new NBTTagList();
         for (Map.Entry<QIOResourceDescriptor, Long> entry : snapshot().entrySet()) {
             NBTTagCompound value = new NBTTagCompound();
@@ -183,6 +227,11 @@ public final class CloudworksInventory {
         }
         tag.setTag("contents", entries);
         return tag;
+    }
+
+    private void addTotal(long change) {
+        if (perResourceCapacity) resourceTotal = resourceTotal.add(BigInteger.valueOf(change));
+        else total = Math.addExact(total, change);
     }
 
     public void collectChanges(CloudworksInventory previous, String warehouse, CloudworksWarehouseDelta delta) {

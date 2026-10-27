@@ -8,6 +8,7 @@ import mekanism.cloudworks.common.network.data.CloudworksLineDraft;
 import net.minecraft.item.ItemStack;
 import mekanism.cloudworks.common.registry.CloudworksRegistries;
 import mekanism.cloudworks.common.registry.MachineKey;
+import mekanism.cloudworks.common.data.CloudworksAuxiliaryNodeData;
 
 /** Allocate the live per-type deficit to individual waiting cards without claiming any machines. */
 public final class CloudworksBlueprintShortages {
@@ -56,6 +57,8 @@ public final class CloudworksBlueprintShortages {
             if (line.lineId().equals(draft.line)) continue;
             for (MachineNodeData node : line.machines())
                 available.merge(CloudworksRegistries.identityKey(node.machine()), -node.machineCount(), Math::addExact);
+            for (CloudworksAuxiliaryNodeData node : line.auxiliaries())
+                available.merge(CloudworksRegistries.identityKey(node.type()), -1L, Math::addExact);
         }
         for (CloudworksLineDraft.Machine machine : draft.machines) {
             MachineKey type = CloudworksRegistries.identityKey(machine.type);

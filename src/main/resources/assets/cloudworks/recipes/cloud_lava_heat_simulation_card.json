@@ -6,7 +6,7 @@
     " M "
   ],
   "key": {
-    "M": { "item": "minecraft:magma_block" },
+    "M": { "item": "minecraft:lava_bucket" },
     "A": { "item": "mekanism:enrichedalloy" },
     "C": { "item": "mekanism:controlcircuit", "data": 1 }
   },

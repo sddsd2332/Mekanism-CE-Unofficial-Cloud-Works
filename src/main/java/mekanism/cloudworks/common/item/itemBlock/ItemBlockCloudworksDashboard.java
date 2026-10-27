@@ -17,6 +17,7 @@ import mekanism.cloudworks.common.tile.TileEntityCloudDashboard;
 import java.util.UUID;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import mekanism.common.util.MekanismUtils;
 
 public class ItemBlockCloudworksDashboard extends ItemBlock
         implements IItemBlockPlacementData, IItemSustainedInventory, ISecurityItem {
@@ -35,7 +36,7 @@ public class ItemBlockCloudworksDashboard extends ItemBlock
     @Nullable
     @Override
     public UUID getOwnerUUID(ItemStack stack) {
-        return mekanism.common.util.MekanismUtils.parseUUID(ItemDataUtils.getString(stack, "ownerUUID"));
+        return MekanismUtils.parseUUID(ItemDataUtils.getString(stack, "ownerUUID"));
     }
 
     @Override

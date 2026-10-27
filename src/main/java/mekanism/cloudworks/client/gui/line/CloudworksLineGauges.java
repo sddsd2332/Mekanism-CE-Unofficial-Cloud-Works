@@ -4,6 +4,8 @@ import mekanism.client.gui.IGuiWrapper;
 import mekanism.client.gui.element.gauge.GuiEnergyGauge;
 import mekanism.cloudworks.common.inventory.ContainerCloudworks;
 import mekanism.cloudworks.common.network.data.CloudworksGuiData;
+import java.util.ArrayList;
+import java.util.List;
 
 public final class CloudworksLineGauges {
     private CloudworksLineGauges() {
@@ -36,8 +38,8 @@ public final class CloudworksLineGauges {
             }
         }, GuiEnergyGauge.Type.STANDARD.asGaugeType(), gui, x, y) {
             @Override
-            public java.util.List<String> getTooltipText() {
-                java.util.List<String> lines = new java.util.ArrayList<>();
+            public List<String> getTooltipText() {
+                List<String> lines = new ArrayList<>();
                 lines.add(GuiLineWindow.tr(switch (index) {
                     case 0 -> "receiving_energy";
                     case 1 -> "cloud_energy_pool";

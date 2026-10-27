@@ -5,6 +5,8 @@ import io.netty.buffer.Unpooled;
 import java.io.File;
 import javax.annotation.Nullable;
 import net.minecraftforge.common.config.Configuration;
+import mekanism.cloudworks.api.transfer.CloudworksWarehouseCaps;
+import mekanism.cloudworks.common.service.CloudworksOutputMultiplier;
 
 /** Mek-style options; server workers read only the immutable startup snapshot. */
 public final class CloudworksConfig {
@@ -54,6 +56,7 @@ public final class CloudworksConfig {
             Settings snapshot = new Settings(copy);
             serverValues = copy;
             settings = snapshot;
+            CloudworksWarehouseCaps.configureItemTypeCap(snapshot.warehouseItemTypeCap);
         } finally { buffer.release(); }
     }
 
@@ -75,8 +78,12 @@ public final class CloudworksConfig {
     public static final class Settings {
         public final double receivingCapacity, cloudCapacity, sendingCapacity;
         public final int initialLines, maxLines, initialMachineNodes, maxMachineNodes, initialWorkRate, maxWorkRate;
-        public final long maxMachinesPerNode, recycleCapacityPerType;
-        public final boolean offlineProcessingEnabled;
+        public final long maxMachinesPerNode, recycleCapacityPerType, warehouseItemTypeCap;
+        public final int maxWarehouseCapMultiplier, maxLineBufferMultiplier;
+        public final int maxOutputMultiplierUnits;
+        public final boolean offlineProcessingEnabled, terminalItemUploadsEnabled;
+        public final boolean durableCheckpoints;
+        public final boolean ftbAutoCreateTeam, ftbOwnerFollows, ftbDissolveFollows;
         public final int workerThreads, checkpointIntervalTicks, portTransferIntervalTicks, guiRefreshIntervalTicks;
 
         private Settings(CloudworksConfig source) {
@@ -89,14 +96,26 @@ public final class CloudworksConfig {
             maxMachineNodes = positive(general.maxMachineNodes.val());
             initialMachineNodes = Math.min(positive(general.initialMachineNodes.val()), maxMachineNodes);
             maxWorkRate = positive(general.maxWorkRate.val());
+            maxOutputMultiplierUnits = CloudworksOutputMultiplier.units(
+                    general.maxOutputMultiplier.val());
             initialWorkRate = Math.min(positive(general.initialWorkRate.val()), maxWorkRate);
             maxMachinesPerNode = general.maxMachinesPerNode.val();
             recycleCapacityPerType = general.recycleCapacityPerType.val();
-            if (maxMachinesPerNode < 1 || recycleCapacityPerType < 1 || recycleCapacityPerType > Long.MAX_VALUE / 128)
+            warehouseItemTypeCap = general.warehouseItemTypeCap.val();
+            maxWarehouseCapMultiplier = general.maxWarehouseCapMultiplier.val();
+            maxLineBufferMultiplier = general.maxLineBufferMultiplier.val();
+            if (maxMachinesPerNode < 1 || recycleCapacityPerType < 1 || recycleCapacityPerType > Long.MAX_VALUE / 128
+                    || warehouseItemTypeCap < 1 || warehouseItemTypeCap > Long.MAX_VALUE / 1_000L
+                    || maxWarehouseCapMultiplier < 1 || maxLineBufferMultiplier < 1)
                 throw new IllegalArgumentException("Invalid Cloudworks quantity limit");
             offlineProcessingEnabled = general.offlineProcessingEnabled.val();
+            terminalItemUploadsEnabled = general.terminalItemUploadsEnabled.val();
+            ftbAutoCreateTeam = general.ftbAutoCreateTeam.val();
+            ftbOwnerFollows = general.ftbOwnerFollows.val();
+            ftbDissolveFollows = general.ftbDissolveFollows.val();
             workerThreads = source.runtime.workerThreads.val();
             checkpointIntervalTicks = source.runtime.checkpointIntervalTicks.val();
+            durableCheckpoints = source.runtime.durableCheckpoints.val();
             portTransferIntervalTicks = source.runtime.portTransferIntervalTicks.val();
             guiRefreshIntervalTicks = source.runtime.guiRefreshIntervalTicks.val();
             if (workerThreads < 0 || workerThreads > 256 || checkpointIntervalTicks < 20 || checkpointIntervalTicks > 12000

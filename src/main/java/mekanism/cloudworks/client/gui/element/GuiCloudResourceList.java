@@ -11,6 +11,7 @@ import mekanism.client.gui.element.scroll.GuiScrollList;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.text.TextComponentString;
 import net.minecraftforge.fluids.FluidStack;
+import mekanism.common.Mekanism;
 
 public final class GuiCloudResourceList extends GuiScrollList {
 
@@ -86,6 +87,9 @@ public final class GuiCloudResourceList extends GuiScrollList {
                 default -> GuiUtils.fill(x + 2, y + 2, x + 14, y + 14, 0xFF727272);
             }
         } catch (RuntimeException ignored) {
+            if (Mekanism.logger != null)
+                Mekanism.logger.debug("Could not render Cloudworks resource icon {}",
+                        resource.getCodecId(), ignored);
             GuiUtils.fill(x + 2, y + 2, x + 14, y + 14, 0xFF727272);
         }
     }
@@ -110,6 +114,9 @@ public final class GuiCloudResourceList extends GuiScrollList {
                 }
             }
         } catch (RuntimeException ignored) {
+            if (Mekanism.logger != null)
+                Mekanism.logger.debug("Could not resolve Cloudworks resource name {}",
+                        resource.getCodecId(), ignored);
         }
         return resource.getCodecId().toString();
     }

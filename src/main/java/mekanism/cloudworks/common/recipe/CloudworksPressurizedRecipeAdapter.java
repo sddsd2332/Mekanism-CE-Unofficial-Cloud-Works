@@ -12,7 +12,12 @@ public final class CloudworksPressurizedRecipeAdapter extends CloudworksNativeRe
 
     @Override
     protected CloudworksRecipeBatch describe(PressurizedRecipe recipe) {
-        return new CloudworksRecipeBatch().item(recipe.getInput().getSolid()).fluid(recipe.getInput().getFluid()).gas(recipe.getInput().getGas(), recipe.getInput().getGas().amount).output(recipe.getOutput().getItemOutput()).output(recipe.getOutput().getGasOutput());
+        // TileEntityPRC:263-264 charges BASE_ENERGY_PER_TICK + recipe.extraEnergy
+        // every tick; the profile keeps the base and the recipe carries the extra.
+        return new CloudworksRecipeBatch().item(recipe.getInput().getSolid()).fluid(recipe.getInput().getFluid())
+                .gas(recipe.getInput().getGas(), recipe.getInput().getGas().amount)
+                .output(recipe.getOutput().getItemOutput()).output(recipe.getOutput().getGasOutput())
+                .extraEnergy(recipe.extraEnergy);
     }
 
     @Override

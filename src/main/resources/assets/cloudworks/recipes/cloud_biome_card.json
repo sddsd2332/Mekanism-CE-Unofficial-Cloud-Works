@@ -1,0 +1,10 @@
+{
+  "type": "forge:ore_shaped",
+  "pattern": [" Q ", "ACA", " Q "],
+  "key": {
+    "Q": { "item": "minecraft:quartz" },
+    "A": { "item": "mekanism:enrichedalloy" },
+    "C": { "item": "minecraft:sapling", "data": 0 }
+  },
+  "result": { "item": "cloudworks:cloud_biome_card" }
+}

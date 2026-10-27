@@ -9,6 +9,9 @@ import net.minecraft.nbt.NBTTagList;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import mekanism.cloudworks.common.content.CloudworksTerminalSlots;
+import mekanism.cloudworks.common.registry.CloudworksRegistries;
+import mekanism.common.inventory.slot.BasicInventorySlot;
 
 /** Durable inventory of one physical terminal, independent of the cloud record. */
 public final class CloudworksTerminalState {
@@ -53,7 +56,7 @@ public final class CloudworksTerminalState {
             throw new IllegalArgumentException("Foreign terminal");
         for (int i = 0; i < slots.size(); i++) {
             IInventorySlot slot = host.terminalSlots().get(i);
-            if (slot instanceof mekanism.common.inventory.slot.BasicInventorySlot basic)
+            if (slot instanceof BasicInventorySlot basic)
                 basic.setStackUnchecked(slots.get(i).copy());
             else slot.setStack(slots.get(i).copy());
         }
@@ -97,17 +100,14 @@ public final class CloudworksTerminalState {
         if (slots.size() != 5) throw new IllegalArgumentException("Invalid terminal slot count");
         for (int index : new int[]{0, 1})
             if (!slots.get(index).isEmpty()
-                    && !mekanism.cloudworks.common.registry.CloudworksRegistries.isRegistered(slots.get(index)))
+                    && !CloudworksRegistries.isRegistered(slots.get(index)))
                 throw new IllegalArgumentException("Unregistered terminal machine");
         ItemStack energy = slots.get(2);
         if (!energy.isEmpty() && (energy.getCount() != 1
-                || !mekanism.cloudworks.common.content.CloudworksTerminalSlots.acceptsEnergy(energy)))
+                || !CloudworksTerminalSlots.acceptsEnergy(energy)))
             throw new IllegalArgumentException("Invalid terminal energy item");
-        for (int index : new int[]{3, 4}) {
-            ItemStack upgrade = slots.get(index);
-            if (!upgrade.isEmpty() && !mekanism.cloudworks.common.content.CloudworksTerminalSlots.acceptsUpgrade(upgrade))
-                throw new IllegalArgumentException("Invalid terminal upgrade");
-        }
+        // Upgrade bindings may change between launches. Keep valid old stacks retrievable;
+        // admission is checked against the current binding by the live upload transaction.
         return new CloudworksTerminalState(UUID.fromString(tag.getString("owner")),
                 UUID.fromString(tag.getString("terminalId")), UUID.fromString(tag.getString("transferId")), slots);
     }

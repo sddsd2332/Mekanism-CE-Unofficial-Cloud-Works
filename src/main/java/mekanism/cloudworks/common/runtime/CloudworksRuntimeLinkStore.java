@@ -5,7 +5,7 @@ import java.util.Arrays;
 /** Integer endpoints and compiled port ids, in topology/priority order. */
 public final class CloudworksRuntimeLinkStore {
     public static final byte CHANNEL_INPUT = 0, CHANNEL_TO_MACHINE = 1, MACHINE_TO_MACHINE = 2,
-            MACHINE_TO_CHANNEL = 3, CHANNEL_OUTPUT = 4, HEAT = 5;
+            MACHINE_TO_CHANNEL = 3, CHANNEL_OUTPUT = 4, HEAT = 5, AUXILIARY_INPUT = 6;
     private int size;
     private long version;
     private int[] source = new int[32], target = new int[32], sourcePort = new int[32],
@@ -27,7 +27,7 @@ public final class CloudworksRuntimeLinkStore {
 
     public int add(int lineIndex, byte stage, int from, int to, int fromPort, int toPort,
             int[] resourceFilters, double fraction, double carried) {
-        if (lineIndex < 0 || stage < CHANNEL_INPUT || stage > HEAT || from < 0 || to < 0
+        if (lineIndex < 0 || stage < CHANNEL_INPUT || stage > AUXILIARY_INPUT || from < 0 || to < 0
                 || fromPort < 0 || toPort < 0 || resourceFilters == null || !Double.isFinite(fraction)
                 || fraction < 0 || fraction > 1 || !Double.isFinite(carried) || carried < 0 || carried >= 1)
             throw new IllegalArgumentException("Invalid runtime link");

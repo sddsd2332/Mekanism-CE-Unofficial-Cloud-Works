@@ -1,6 +1,6 @@
 package mekanism.cloudworks.common.runtime;
 
-import mekanism.cloudworks.api.CloudworksThermalPlan;
+import mekanism.cloudworks.api.machine.CloudworksThermalPlan;
 
 /** Snapshot-budgeted heat exchange shared by the Runtime tick and its conservation tests. */
 final class CloudworksRuntimeThermalExchange {

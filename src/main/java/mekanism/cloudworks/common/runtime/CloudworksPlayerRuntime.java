@@ -4,6 +4,11 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import mekanism.cloudworks.common.service.CloudworksModuleEvents;
 
 /**
  * Single mutable owner of one player's cloud execution state.
@@ -22,12 +27,22 @@ public final class CloudworksPlayerRuntime {
     private final CloudworksRuntimeThermalStore thermal = new CloudworksRuntimeThermalStore();
     private final ConcurrentLinkedQueue<CloudworksExternalEvent> externalEvents = new ConcurrentLinkedQueue<>();
     private final AtomicBoolean running = new AtomicBoolean();
+    private final Map<String, Double> costRemainders = new LinkedHashMap<>();
+    Map<String, Double> costRemainders() { return costRemainders; }
     private CloudworksRuntimeProgram program;
     private CloudworksRuntimeSimulation simulation;
     private UUID[] linkIds = new UUID[0];
     private long acceptedSequence;
     private volatile long appliedSequence;
     private volatile long revision;
+    private final List<CloudworksModuleEvents.Event> moduleEvents =
+            new ArrayList<>();
+    void moduleEvent(CloudworksModuleEvents.Event event) { moduleEvents.add(event); }
+    List<CloudworksModuleEvents.Event> drainModuleEvents() {
+        List<CloudworksModuleEvents.Event> result = new ArrayList<>(moduleEvents);
+        moduleEvents.clear();
+        return result;
+    }
 
     CloudworksPlayerRuntime(UUID owner) {
         this.owner = Objects.requireNonNull(owner);
@@ -102,6 +117,7 @@ public final class CloudworksPlayerRuntime {
 
     void install(CloudworksRuntimeProgram next) {
         if (running.get()) throw new IllegalStateException("Cannot install running Runtime");
+        moduleEvents.clear();
         program = Objects.requireNonNull(next);
         simulation = new CloudworksRuntimeSimulation(this, next);
     }

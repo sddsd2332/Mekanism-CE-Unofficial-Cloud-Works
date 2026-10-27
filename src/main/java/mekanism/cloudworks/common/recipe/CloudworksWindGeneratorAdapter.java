@@ -1,9 +1,9 @@
 package mekanism.cloudworks.common.recipe;
 
-import mekanism.cloudworks.api.CloudworksEnergyGenerator;
-import mekanism.cloudworks.api.CloudworksGenerationContext;
-import mekanism.cloudworks.api.CloudworksGenerationPlan;
-import mekanism.cloudworks.common.data.MachineNodeData;
+import mekanism.cloudworks.api.machine.CloudworksEnergyGenerator;
+import mekanism.cloudworks.api.environment.CloudworksGenerationContext;
+import mekanism.cloudworks.api.environment.CloudworksGenerationPlan;
+import mekanism.cloudworks.api.module.CloudworksMachineContext;
 
 public final class CloudworksWindGeneratorAdapter implements CloudworksEnergyGenerator {
     private final double minimum, maximum;
@@ -17,8 +17,7 @@ public final class CloudworksWindGeneratorAdapter implements CloudworksEnergyGen
         this.rotorOffset = rotorOffset;
     }
 
-    @Override
-    public double generationPerTick(MachineNodeData node, int operations, CloudworksGenerationContext context) {
+    private double generation(int operations, CloudworksGenerationContext context) {
         if (operations <= 0 || minimum <= 0 || !Double.isFinite(minimum)
                 || !Double.isFinite(maximum) || maxHeight <= minHeight) return 0;
         double height = Math.min(maxHeight, Math.max(minHeight, (long) context.simulatedHeight() + rotorOffset));
@@ -27,14 +26,14 @@ public final class CloudworksWindGeneratorAdapter implements CloudworksEnergyGen
         return Double.isFinite(generation) ? Math.max(0, generation) : 0;
     }
 
-    @Override
-    public double generationPerTick(MachineNodeData node, int operations) {
-        return generationPerTick(node, operations, new CloudworksGenerationContext(0, 1, 0, false));
+    public int heightLimit() { return (int) Math.max(0, Math.min(256L, (long) maxHeight - rotorOffset)); }
+    public int effectiveHeight(int installed) {
+        return (int) Math.min(maxHeight, Math.max(minHeight, (long) Math.max(0, installed) + rotorOffset));
     }
 
     @Override
-    public CloudworksGenerationPlan freezeGeneration(MachineNodeData node, int operations,
+    public CloudworksGenerationPlan freeze(CloudworksMachineContext node, int operations,
             CloudworksGenerationContext context) {
-        return CloudworksGenerationPlan.wind(generationPerTick(node, operations, context));
+        return CloudworksGenerationPlan.wind(generation(operations, context));
     }
 }

@@ -2,16 +2,20 @@ package mekanism.cloudworks.common.integration.crafttweaker;
 
 import crafttweaker.annotations.ZenRegister;
 import crafttweaker.api.item.IItemStack;
-import mekanism.cloudworks.api.CloudworksThermalPlan;
-import mekanism.cloudworks.common.integration.CloudworksScriptMachines;
-import mekanism.cloudworks.common.integration.CloudworksThermalContracts;
-import mekanism.cloudworks.common.registry.CloudworksRegistries;
-import mekanism.cloudworks.common.registry.MachineExecutionProfile;
-import mekanism.cloudworks.common.slot.MachineSlotLayout;
+import mekanism.cloudworks.api.CloudworksAPI;
+import mekanism.cloudworks.api.machine.CloudworksMachineDefinition;
+import mekanism.cloudworks.api.machine.CloudworksThermalPlan;
+import mekanism.cloudworks.api.machine.CloudworksThermalContracts;
+import mekanism.cloudworks.api.machine.MachineExecutionProfile;
+import mekanism.cloudworks.api.machine.MachineIdentityPolicy;
+import mekanism.cloudworks.api.machine.MachineSlotLayout;
 import mekanism.api.qio.resource.QIOResourceCodecs;
 import net.minecraft.item.ItemStack;
 import stanhebben.zenscript.annotations.ZenClass;
 import stanhebben.zenscript.annotations.ZenMethod;
+import java.util.Collections;
+import mekanism.cloudworks.api.machine.CloudworksMachineInfo;
+import mekanism.cloudworks.api.module.MachineUpgradePolicy;
 
 @ZenClass("mods.cloudworks.Thermal")
 @ZenRegister
@@ -23,7 +27,7 @@ public final class CloudworksThermal {
         ItemStack machine = CloudworksMachines.stack(item);
         CloudworksScriptAction.submit("Cloudworks thermal capacitor on " + machine, () -> {
             CloudworksThermalPlan plan = require(machine);
-            CloudworksRegistries.registerThermal(machine, plan.withCapacitor(capacity, inverseConduction, inverseInsulation));
+            CloudworksAPI.registerThermalPlan(machine, plan.withCapacitor(capacity, inverseConduction, inverseInsulation));
         }, true);
     }
 
@@ -34,7 +38,7 @@ public final class CloudworksThermal {
             CloudworksThermalPlan plan = require(machine);
             if (plan.kind != CloudworksThermalPlan.Kind.EVAPORATION)
                 throw new IllegalArgumentException("Solar panels require an evaporation tower");
-            CloudworksRegistries.registerThermal(machine,
+            CloudworksAPI.registerThermalPlan(machine,
                     plan.withEnvironment(plan.lavaEnvironmentHeat, plan.netherEnvironmentHeat, panels));
         }, true);
     }
@@ -43,9 +47,11 @@ public final class CloudworksThermal {
     public static void resistive(IItemStack item, double energyPerTick, double energyCapacity) {
         ItemStack machine = CloudworksMachines.stack(item);
         CloudworksScriptAction.submit("Cloudworks resistive heater " + machine, () -> {
-            CloudworksScriptMachines.register(machine, new MachineExecutionProfile(1, energyPerTick, energyCapacity, 1),
-                    new MachineSlotLayout());
-            CloudworksRegistries.registerThermal(machine, CloudworksThermalContracts.resistive());
+            CloudworksAPI.registerMachine(new CloudworksMachineDefinition(machine,
+                    new MachineExecutionProfile(1, energyPerTick, energyCapacity, 1,
+                            MachineUpgradePolicy.NONE),
+                    new MachineSlotLayout(), MachineIdentityPolicy.exactNbt(),
+                    Collections.emptyList(), null, CloudworksThermalContracts.resistive()));
         });
     }
 
@@ -53,17 +59,20 @@ public final class CloudworksThermal {
     public static void fuelwood(IItemStack item, int itemCapacity) {
         ItemStack machine = CloudworksMachines.stack(item);
         CloudworksScriptAction.submit("Cloudworks fuelwood heater " + machine, () -> {
-            CloudworksScriptMachines.register(machine, new MachineExecutionProfile(1, 0, 0, 1),
+            CloudworksAPI.registerMachine(new CloudworksMachineDefinition(machine,
+                    new MachineExecutionProfile(1, 0, 0, 1, MachineUpgradePolicy.NONE),
                     new MachineSlotLayout()
                             .add("item_input", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.INPUT, itemCapacity)
-                            .add("item_output", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, itemCapacity));
-            CloudworksRegistries.registerThermal(machine, CloudworksThermalContracts.fuelwood());
+                            .add("item_output", QIOResourceCodecs.ITEM_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, itemCapacity),
+                    MachineIdentityPolicy.exactNbt(), Collections.emptyList(), null,
+                    CloudworksThermalContracts.fuelwood()));
         });
     }
 
     private static CloudworksThermalPlan require(ItemStack machine) {
-        CloudworksThermalPlan plan = CloudworksRegistries.thermal(CloudworksRegistries.identityKey(machine));
-        if (plan == null || !CloudworksRegistries.aliasTarget(machine).isEmpty())
+        CloudworksMachineInfo info = CloudworksAPI.machineInfo(machine);
+        CloudworksThermalPlan plan = info.thermal();
+        if (!info.registered() || plan == null || !info.aliasTarget().isEmpty())
             throw new IllegalArgumentException("A registered non-alias thermal machine is required");
         return plan;
     }

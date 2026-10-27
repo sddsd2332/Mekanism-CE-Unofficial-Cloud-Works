@@ -8,12 +8,15 @@ import mekanism.common.config.MekanismConfig;
 import mekanism.common.content.boiler.SynchronizedBoilerData;
 import mekanism.common.recipe.RecipeHandler;
 import mekanism.common.recipe.machines.FusionCoolingRecipe;
+import net.minecraftforge.fluids.FluidStack;
 
-public final class CloudworksFusionReactorRecipeAdapter extends CloudworksMultiblockRecipeAdapter
-        implements mekanism.cloudworks.api.CloudworksEnergyGenerator {
+public final class CloudworksFusionReactorRecipeAdapter extends CloudworksMultiblockRecipeAdapter {
+    private final mekanism.cloudworks.api.machine.CloudworksThermalPlan thermal;
     public CloudworksFusionReactorRecipeAdapter(int injection, boolean cooled) {
         super(contracts(injection, cooled));
+        thermal = mekanism.cloudworks.common.integration.CloudworksGeneratorsIntegration.fusionPlan(injection, cooled);
     }
+    @Override public mekanism.cloudworks.api.machine.CloudworksThermalPlan thermalPlan() { return thermal; }
 
     private static List<CloudworksContractRecipeAdapter.Contract> contracts(int injection, boolean cooled) {
         if (injection < 2 || injection % 2 != 0
@@ -38,8 +41,8 @@ public final class CloudworksFusionReactorRecipeAdapter extends CloudworksMultib
             int fluidAmount = (int) quantity, index = 0;
             for (Object value : RecipeHandler.Recipe.FUSION_COOLING.get().values()) {
                 FusionCoolingRecipe recipe = (FusionCoolingRecipe) value;
-                net.minecraftforge.fluids.FluidStack input = recipe.getInput().ingredient.copy();
-                net.minecraftforge.fluids.FluidStack output = recipe.getOutput().output.copy();
+                FluidStack input = recipe.getInput().ingredient.copy();
+                FluidStack output = recipe.getOutput().output.copy();
                 input.amount = fluidAmount;
                 output.amount = Math.multiplyExact(fluidAmount, output.amount);
                 result.add(new CloudworksContractRecipeAdapter.Contract("fusion_" + mode + "_" + index++,
@@ -58,26 +61,4 @@ public final class CloudworksFusionReactorRecipeAdapter extends CloudworksMultib
                 .gas(new GasStack(MekanismFluids.Tritium, 1), injection / 2, "tritium_input");
     }
 
-    @Override
-    public double generationPerTick(mekanism.cloudworks.common.data.MachineNodeData node, int operations) {
-        CloudworksContractRecipeAdapter.Contract recipe = registered(preview(node));
-        if (recipe == null || operations <= 0) return 0;
-        int low = 0, high = operations;
-        while (low < high) {
-            int middle = low + (int) (((long) high - low + 1) / 2);
-            if (recipe.batch.allocate(stock(node), middle) != null
-                    && mekanism.cloudworks.common.service.CloudworksResourceCapacity.canOutput(node, recipe.batch.outputs(middle)))
-                low = middle;
-            else high = middle - 1;
-        }
-        return recipe.batch.energyPerOperation() * low;
-    }
-
-    @Override
-    public mekanism.cloudworks.api.CloudworksGenerationPlan freezeGeneration(
-            mekanism.cloudworks.common.data.MachineNodeData node, int operations,
-            mekanism.cloudworks.api.CloudworksGenerationContext context) {
-        // Runtime burns the resource contract; a constant plan must not credit the same fuel twice.
-        return mekanism.cloudworks.api.CloudworksGenerationPlan.constant(0);
-    }
 }

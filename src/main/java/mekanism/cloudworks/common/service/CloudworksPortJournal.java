@@ -11,10 +11,15 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Function;
 import mekanism.api.qio.resource.QIOResourceDescriptor;
 import mekanism.cloudworks.common.data.CloudworksInventory;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.nbt.NBTTagList;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.Locale;
+import mekanism.cloudworks.common.data.CloudworksData;
+import mekanism.cloudworks.common.data.CloudworksPortRecord;
 
 /**
  * Small durable port records. Full projections are compacted once before a
@@ -24,13 +29,19 @@ final class CloudworksPortJournal {
     private static final String WATERMARK = "cwPortSequence";
     private final Path root;
     private final Storage storage;
-    private final Map<UUID, Long> sequences = new java.util.concurrent.ConcurrentHashMap<>();
-    private final Map<UUID, Integer> pendingRecords = new java.util.concurrent.ConcurrentHashMap<>();
-    private final Map<UUID, Object> ownerLocks = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Function<UUID, Path> ownerDirectory;
+    private final Map<UUID, Long> sequences = new ConcurrentHashMap<>();
+    private final Map<UUID, Integer> pendingRecords = new ConcurrentHashMap<>();
+    private final Map<UUID, Object> ownerLocks = new ConcurrentHashMap<>();
 
     CloudworksPortJournal(Path root, Storage storage) {
+        this(root, storage, owner -> root.resolve(owner.toString()));
+    }
+
+    CloudworksPortJournal(Path root, Storage storage, Function<UUID, Path> ownerDirectory) {
         this.root = root;
         this.storage = storage;
+        this.ownerDirectory = ownerDirectory;
     }
 
     void prepare(UUID owner, NBTTagCompound intent) {
@@ -39,7 +50,7 @@ final class CloudworksPortJournal {
             long last = 0;
             for (Path file : records(owner)) last = Math.max(last, sequence(file));
             for (String name : new String[]{"cloud", "receiving", "sending", "port-watermark"}) {
-                Path file = root.resolve(owner.toString()).resolve(name + ".dat");
+                Path file = ownerDirectory.apply(owner).resolve(name + ".dat");
                 if (Files.exists(file)) last = Math.max(last, storage.read(file).getLong(WATERMARK));
             }
             return last;
@@ -56,7 +67,7 @@ final class CloudworksPortJournal {
         if (sequence <= 0 || intent.getInteger("schema") != 2
                 || !owner.toString().equals(intent.getString("owner")))
             throw new IllegalArgumentException("Invalid port journal");
-        Path file = directory(owner).resolve(String.format(java.util.Locale.ROOT, "%020d.dat", sequence));
+        Path file = directory(owner).resolve(String.format(Locale.ROOT, "%020d.dat", sequence));
         if (Files.exists(file)) {
             if (!storage.read(file).equals(intent)) throw new IllegalStateException("Conflicting port journal");
         } else {
@@ -71,7 +82,7 @@ final class CloudworksPortJournal {
         synchronized (ownerLocks.computeIfAbsent(owner, ignored -> new Object())) {
         List<Path> records = records(owner);
         if (records.isEmpty()) return;
-        Path ownerRoot = root.resolve(owner.toString());
+        Path ownerRoot = ownerDirectory.apply(owner);
         Map<String, NBTTagCompound> projections = new LinkedHashMap<>();
         Map<String, CloudworksInventory> inventories = new HashMap<>();
         Map<UUID, NBTTagCompound> ports = new LinkedHashMap<>();
@@ -87,8 +98,8 @@ final class CloudworksPortJournal {
             for (int index = 0; index < operations.tagCount(); index++) {
                 NBTTagCompound operation = operations.getCompoundTagAt(index);
                 if (operation.hasKey("port", 10)) {
-                    mekanism.cloudworks.common.data.CloudworksPortRecord port =
-                            mekanism.cloudworks.common.data.CloudworksPortRecord.read(operation.getCompoundTag("port"));
+                    CloudworksPortRecord port =
+                            CloudworksPortRecord.read(operation.getCompoundTag("port"));
                     if (!port.owner.equals(owner)) throw new IllegalStateException("Invalid port owner");
                     ports.put(port.id, port.write());
                 }
@@ -152,7 +163,7 @@ final class CloudworksPortJournal {
         }
     }
 
-    private Path directory(UUID owner) { return root.resolve(owner.toString()).resolve("port-journal"); }
+    private Path directory(UUID owner) { return ownerDirectory.apply(owner).resolve("port-journal"); }
 
     private List<Path> records(UUID owner) {
         List<Path> files = new ArrayList<>();
@@ -177,9 +188,9 @@ final class CloudworksPortJournal {
     }
 
     private static final class CloudworksDataEmpty {
-        final mekanism.cloudworks.common.data.CloudworksData cloud;
+        final CloudworksData cloud;
         CloudworksDataEmpty(UUID owner) {
-            cloud = mekanism.cloudworks.common.data.CloudworksData.create(owner);
+            cloud = CloudworksData.create(owner);
         }
         NBTTagCompound warehouse(String name) {
             return "receiving".equals(name) ? cloud.writeReceiving() : cloud.writeSending();

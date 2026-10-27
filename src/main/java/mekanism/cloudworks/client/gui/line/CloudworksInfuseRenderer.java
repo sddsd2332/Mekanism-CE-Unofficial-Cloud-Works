@@ -3,16 +3,20 @@ package mekanism.cloudworks.client.gui.line;
 import mekanism.api.qio.client.QIOResourceRenderer;
 import mekanism.api.qio.client.QIOResourceRendererRegistry;
 import mekanism.client.gui.GuiUtils;
-import mekanism.cloudworks.common.recipe.CloudworksInfuseResourceCodec;
+import mekanism.cloudworks.api.CloudworksInfuseResourceCodec;
 import mekanism.common.InfuseStorage;
 import net.minecraft.util.ResourceLocation;
 
 /** Client presentation for Cloudworks' own extension codec. */
 public final class CloudworksInfuseRenderer implements QIOResourceRenderer<InfuseStorage> {
+    private static boolean registered;
+
     public static void register() {
+        if (registered) return;
         CloudworksInfuseResourceCodec.register();
         if (QIOResourceRendererRegistry.INSTANCE.get(CloudworksInfuseResourceCodec.ID) == null)
             QIOResourceRendererRegistry.INSTANCE.register(new CloudworksInfuseRenderer());
+        registered = true;
     }
 
     @Override

@@ -9,7 +9,7 @@ import mekanism.api.qio.client.QIOResourceRenderer;
 import mekanism.api.qio.client.QIOResourceRendererRegistry;
 import mekanism.api.qio.client.QIOResourceSelectionAdapterRegistry;
 import mekanism.api.qio.resource.*;
-import mekanism.cloudworks.common.recipe.CloudworksInfuseResourceCodec;
+import mekanism.cloudworks.api.CloudworksInfuseResourceCodec;
 import mekanism.cloudworks.common.service.CloudworksEditorData;
 import mekanism.common.InfuseStorage;
 import net.minecraft.creativetab.CreativeTabs;
@@ -22,6 +22,10 @@ import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.network.FMLNetworkEvent;
 import net.minecraftforge.fml.relauncher.Side;
+import mekanism.cloudworks.client.gui.element.GuiCloudQIOResourceGrid;
+import mekanism.common.Mekanism;
+import net.minecraft.client.Minecraft;
+import net.minecraftforge.client.event.TextureStitchEvent;
 
 /** Incrementally enumerates local registry templates, including supported recipe-viewer extension ingredients. */
 @Mod.EventBusSubscriber(modid = "cloudworks", value = Side.CLIENT)
@@ -31,7 +35,7 @@ public final class CloudworksResourceCatalog {
     private final Set<QIOResourceDescriptor> known = new LinkedHashSet<>();
     private final List<QIOResourceDescriptor> resources = new ArrayList<>();
     private final Map<QIOResourceDescriptor, String> names = new HashMap<>();
-    private final Map<QIOResourceDescriptor, mekanism.cloudworks.client.gui.element.GuiCloudQIOResourceGrid.Entry> entries = new HashMap<>();
+    private final Map<QIOResourceDescriptor, GuiCloudQIOResourceGrid.Entry> entries = new HashMap<>();
     private final Iterator<Item> items = Item.REGISTRY.iterator();
     private final Iterator<?> ingredients;
     private boolean complete;
@@ -48,11 +52,11 @@ public final class CloudworksResourceCatalog {
 
     @SubscribeEvent
     public static void disconnected(FMLNetworkEvent.ClientDisconnectionFromServerEvent event) {
-        net.minecraft.client.Minecraft.getMinecraft().addScheduledTask(() -> shared = null);
+        Minecraft.getMinecraft().addScheduledTask(() -> shared = null);
     }
 
     @SubscribeEvent
-    public static void texturesReloaded(net.minecraftforge.client.event.TextureStitchEvent.Post event) {
+    public static void texturesReloaded(TextureStitchEvent.Post event) {
         // Resource/language reloads can change names and subtype templates.
         shared = null;
     }
@@ -84,7 +88,7 @@ public final class CloudworksResourceCatalog {
                     if (variants.isEmpty()) variants.add(new ItemStack(item));
                     for (ItemStack stack : variants) ingredient(stack);
                 } catch (RuntimeException | LinkageError brokenSubtype) {
-                    mekanism.common.Mekanism.logger.warn("Cannot enumerate Cloudworks resource subtypes for {}", item.getRegistryName());
+                    Mekanism.logger.warn("Cannot enumerate Cloudworks resource subtypes for {}", item.getRegistryName());
                 }
             } else {
                 complete = true;
@@ -108,7 +112,7 @@ public final class CloudworksResourceCatalog {
             }
             QIOResourceSelectionAdapterRegistry.INSTANCE.getIngredientCandidates(ingredient).forEach(this::add);
         } catch (RuntimeException | LinkageError unsupported) {
-            mekanism.common.Mekanism.logger.debug("Unsupported Cloudworks catalog ingredient", unsupported);
+            Mekanism.logger.debug("Unsupported Cloudworks catalog ingredient", unsupported);
         }
     }
 
@@ -119,9 +123,9 @@ public final class CloudworksResourceCatalog {
         return names.computeIfAbsent(descriptor, CloudworksResourceCatalog::name);
     }
 
-    public mekanism.cloudworks.client.gui.element.GuiCloudQIOResourceGrid.Entry entry(QIOResourceDescriptor descriptor) {
+    public GuiCloudQIOResourceGrid.Entry entry(QIOResourceDescriptor descriptor) {
         return entries.computeIfAbsent(descriptor,
-                value -> new mekanism.cloudworks.client.gui.element.GuiCloudQIOResourceGrid.Entry(value, 1));
+                value -> new GuiCloudQIOResourceGrid.Entry(value, 1));
     }
 
     @SuppressWarnings("unchecked")

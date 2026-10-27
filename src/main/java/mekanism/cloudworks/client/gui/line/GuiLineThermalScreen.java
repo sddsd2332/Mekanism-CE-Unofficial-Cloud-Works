@@ -11,6 +11,7 @@ import mekanism.cloudworks.common.network.data.CloudworksGuiData;
 import mekanism.common.util.LangUtils;
 import net.minecraft.util.text.ITextComponent;
 import net.minecraft.util.text.TextComponentString;
+import java.util.Locale;
 
 /** Uses the authoritative GUI packet sample; no NBT access or native world queries. */
 final class GuiLineThermalScreen extends GuiInnerScreen {
@@ -20,17 +21,17 @@ final class GuiLineThermalScreen extends GuiInnerScreen {
 
     private static List<ITextComponent> text(ContainerCloudworks container, UUID id) {
         List<ITextComponent> result = new ArrayList<>();
-        for (CloudworksGuiData.Node node : container.guiData().graph.nodes) {
+        for (mekanism.cloudworks.common.network.data.node.Node node : container.guiData().graph.nodes) {
             if (!id.equals(node.id) || node.thermal == null) continue;
             CloudworksThermalState state = node.thermal;
             result.add(new TextComponentString(LangUtils.localizeWithFormat("cloudworks.thermal.temperature",
-                    String.format(java.util.Locale.ROOT, "%.2f", state.temperature()))));
+                    String.format(Locale.ROOT, "%.2f", state.temperature()))));
             result.add(new TextComponentString(LangUtils.localizeWithFormat("cloudworks.thermal.stored",
-                    String.format(java.util.Locale.ROOT, "%.2f", state.heat))));
+                    String.format(Locale.ROOT, "%.2f", state.heat))));
             result.add(new TextComponentString(LangUtils.localizeWithFormat("cloudworks.thermal.rates",
-                    String.format(java.util.Locale.ROOT, "%.2f", state.produced),
-                    String.format(java.util.Locale.ROOT, "%.2f", state.consumed),
-                    String.format(java.util.Locale.ROOT, "%.2f", state.loss))));
+                    String.format(Locale.ROOT, "%.2f", state.produced),
+                    String.format(Locale.ROOT, "%.2f", state.consumed),
+                    String.format(Locale.ROOT, "%.2f", state.loss))));
             break;
         }
         return result;

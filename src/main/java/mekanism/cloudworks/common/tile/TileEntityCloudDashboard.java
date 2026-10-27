@@ -17,6 +17,12 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
 
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.UUID;
+import mekanism.cloudworks.common.content.CloudworksPhysicalCheckpointService;
+import net.minecraft.util.EnumFacing;
+import net.minecraftforge.common.capabilities.Capability;
+import net.minecraftforge.items.CapabilityItemHandler;
 
 /**
  * Dashboard-terminal tile: hosts the five terminal functional slots
@@ -28,28 +34,28 @@ public class TileEntityCloudDashboard extends TileEntityContainerBlock
         implements CloudworksTerminalHost, ISecurityTile, ISustainedData {
 
     private final TileComponentSecurity securityComponent;
-    private java.util.UUID terminalApplied;
-    private java.util.UUID terminalIdentity = java.util.UUID.randomUUID();
-    private net.minecraft.nbt.NBTTagCompound checkpoint;
-    private java.util.concurrent.CompletableFuture<Void> checkpointConfirmation;
+    private UUID terminalApplied;
+    private UUID terminalIdentity = UUID.randomUUID();
+    private NBTTagCompound checkpoint;
+    private CompletableFuture<Void> checkpointConfirmation;
 
-    @Override public java.util.UUID appliedTerminalTransfer() { return terminalApplied; }
-    @Override public void acknowledgeTerminalTransfer(java.util.UUID id) { terminalApplied = id; }
+    @Override public UUID appliedTerminalTransfer() { return terminalApplied; }
+    @Override public void acknowledgeTerminalTransfer(UUID id) { terminalApplied = id; }
 
     @Override
-    public void writeCustomNBT(net.minecraft.nbt.NBTTagCompound tag) {
+    public void writeCustomNBT(NBTTagCompound tag) {
         super.writeCustomNBT(tag);
         tag.setString("cloudTerminalId", terminalIdentity.toString());
         if (terminalApplied != null) tag.setString("cloudTerminalApplied", terminalApplied.toString());
     }
 
     @Override
-    public void readCustomNBT(net.minecraft.nbt.NBTTagCompound tag) {
+    public void readCustomNBT(NBTTagCompound tag) {
         super.readCustomNBT(tag);
         if (tag.hasKey("cloudTerminalId", 8))
-            terminalIdentity = java.util.UUID.fromString(tag.getString("cloudTerminalId"));
+            terminalIdentity = UUID.fromString(tag.getString("cloudTerminalId"));
         terminalApplied = tag.hasKey("cloudTerminalApplied", 8)
-                ? java.util.UUID.fromString(tag.getString("cloudTerminalApplied")) : null;
+                ? UUID.fromString(tag.getString("cloudTerminalApplied")) : null;
     }
 
     public TileEntityCloudDashboard() {
@@ -95,9 +101,9 @@ public class TileEntityCloudDashboard extends TileEntityContainerBlock
     public void readSustainedData(ItemStack stack) {
         NBTTagCompound data = ItemDataUtils.getCompound(stack, "cloudTerminal");
         if (data.hasKey("cloudTerminalId", 8))
-            terminalIdentity = java.util.UUID.fromString(data.getString("cloudTerminalId"));
+            terminalIdentity = UUID.fromString(data.getString("cloudTerminalId"));
         terminalApplied = data.hasKey("cloudTerminalApplied", 8)
-                ? java.util.UUID.fromString(data.getString("cloudTerminalApplied")) : null;
+                ? UUID.fromString(data.getString("cloudTerminalApplied")) : null;
     }
 
     @Override
@@ -106,20 +112,20 @@ public class TileEntityCloudDashboard extends TileEntityContainerBlock
     }
 
     @Override
-    public java.util.UUID terminalId() {
+    public UUID terminalId() {
         return terminalIdentity;
     }
 
     // Functional slots are operated through the journalled terminal container.
     @Override
-    public boolean hasCapability(net.minecraftforge.common.capabilities.Capability<?> capability, net.minecraft.util.EnumFacing side) {
-        if (capability == net.minecraftforge.items.CapabilityItemHandler.ITEM_HANDLER_CAPABILITY) return false;
+    public boolean hasCapability(Capability<?> capability, EnumFacing side) {
+        if (capability == CapabilityItemHandler.ITEM_HANDLER_CAPABILITY) return false;
         return super.hasCapability(capability, side);
     }
 
     @Override
-    public <T> T getCapability(net.minecraftforge.common.capabilities.Capability<T> capability, net.minecraft.util.EnumFacing side) {
-        if (capability == net.minecraftforge.items.CapabilityItemHandler.ITEM_HANDLER_CAPABILITY) return null;
+    public <T> T getCapability(Capability<T> capability, EnumFacing side) {
+        if (capability == CapabilityItemHandler.ITEM_HANDLER_CAPABILITY) return null;
         return super.getCapability(capability, side);
     }
 
@@ -132,11 +138,11 @@ public class TileEntityCloudDashboard extends TileEntityContainerBlock
     public void persistIdentity() {
         persist();
         if (world == null || world.isRemote) return;
-        net.minecraft.nbt.NBTTagCompound current = writeToNBT(new net.minecraft.nbt.NBTTagCompound());
+        NBTTagCompound current = writeToNBT(new NBTTagCompound());
         if (current.equals(checkpoint) && checkpointConfirmation != null
                 && !checkpointConfirmation.isCompletedExceptionally()) return;
         checkpoint = current;
-        checkpointConfirmation = mekanism.cloudworks.common.content.CloudworksPhysicalCheckpointService.checkpoint(this);
+        checkpointConfirmation = CloudworksPhysicalCheckpointService.checkpoint(this);
     }
 
     @Override

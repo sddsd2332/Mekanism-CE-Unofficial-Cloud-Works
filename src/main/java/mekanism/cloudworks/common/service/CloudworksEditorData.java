@@ -3,12 +3,18 @@ package mekanism.cloudworks.common.service;
 import mekanism.api.qio.resource.QIOResourceDescriptor;
 import mekanism.cloudworks.common.data.*;
 import mekanism.cloudworks.common.registry.CloudworksRegistries;
-import mekanism.cloudworks.common.slot.MachineSlotLayout;
+import mekanism.cloudworks.api.machine.MachineSlotLayout;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.nbt.NBTTagList;
 
 import java.util.*;
+import mekanism.api.gas.GasStack;
+import mekanism.api.qio.resource.QIOResourceCodecs;
+import mekanism.cloudworks.api.CloudworksInfuseResourceCodec;
+import mekanism.common.InfuseStorage;
+import net.minecraft.nbt.NBTTagString;
+import net.minecraftforge.fluids.FluidStack;
 
 /**
  * Sanitized editor projection; machine inventories and operation requirements never leave the server.
@@ -45,7 +51,7 @@ public final class CloudworksEditorData {
             tag.setTag("input", summary(node.inputs()));
             tag.setTag("output", summary(node.outputs()));
             NBTTagList ports = new NBTTagList();
-            MachineSlotLayout layout = CloudworksRegistries.slots(node.machine());
+            MachineSlotLayout layout = node.capabilities().slots();
             if (layout != null) for (MachineSlotLayout.Slot slot : layout.slots()) {
                 ports.appendTag(port(slot.id(), slot.codecId().toString(), slot.role() == MachineSlotLayout.PortRole.OUTPUT));
             }
@@ -57,7 +63,7 @@ public final class CloudworksEditorData {
             tag.removeTag("resourceFilters");
             NBTTagList names = new NBTTagList();
             for (QIOResourceDescriptor filter : link.resourceFilters())
-                names.appendTag(new net.minecraft.nbt.NBTTagString(resourceName(filter)));
+                names.appendTag(new NBTTagString(resourceName(filter)));
             tag.setTag("filterNames", names);
             links.appendTag(tag);
         }
@@ -79,14 +85,14 @@ public final class CloudworksEditorData {
     }
 
     public static String resourceName(QIOResourceDescriptor resource) {
-        mekanism.common.InfuseStorage infuse = resource.resolve(
-                mekanism.cloudworks.common.recipe.CloudworksInfuseResourceCodec.INSTANCE);
+        InfuseStorage infuse = resource.resolve(
+                CloudworksInfuseResourceCodec.INSTANCE);
         if (infuse != null && infuse.getType() != null) return infuse.getType().getLocalizedName();
-        ItemStack item = resource.resolve(mekanism.api.qio.resource.QIOResourceCodecs.ITEM_STACK);
+        ItemStack item = resource.resolve(QIOResourceCodecs.ITEM_STACK);
         if (item != null && !item.isEmpty()) return item.getDisplayName();
-        mekanism.api.gas.GasStack gas = resource.resolve(mekanism.api.qio.resource.QIOResourceCodecs.GAS_STACK);
+        GasStack gas = resource.resolve(QIOResourceCodecs.GAS_STACK);
         if (gas != null) return gas.getGas().getLocalizedName();
-        net.minecraftforge.fluids.FluidStack fluid = resource.resolve(mekanism.api.qio.resource.QIOResourceCodecs.FLUID_STACK);
+        FluidStack fluid = resource.resolve(QIOResourceCodecs.FLUID_STACK);
         if (fluid != null) return fluid.getLocalizedName();
         return resource.getCodecId().toString();
     }

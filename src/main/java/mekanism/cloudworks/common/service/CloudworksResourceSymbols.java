@@ -3,6 +3,12 @@ package mekanism.cloudworks.common.service;
 import mekanism.api.qio.resource.QIOResourceDescriptor;
 
 import java.util.*;
+import it.unimi.dsi.fastutil.ints.IntArrayList;
+import java.util.function.Predicate;
+import mekanism.cloudworks.api.machine.CloudworksMachineAdapter;
+import mekanism.cloudworks.common.recipe.CloudworksFrozenRecipeView;
+import mekanism.cloudworks.common.registry.CloudworksRegistries;
+import mekanism.common.recipe.RecipeHandler;
 
 /**
  * Owner-thread session symbol table binding QIO semantic resource identity to
@@ -32,7 +38,7 @@ public final class CloudworksResourceSymbols {
 
     /** Frozen ingredient predicates only scan the newly appended part of the resource dictionary. */
     public synchronized int[] matchingResources(Object contract, int ingredient,
-            java.util.function.Predicate<QIOResourceDescriptor> matcher) {
+            Predicate<QIOResourceDescriptor> matcher) {
         IngredientMatches cached = ingredientMatches.computeIfAbsent(contract, ignored -> new HashMap<>())
                 .computeIfAbsent(ingredient, ignored -> new IngredientMatches());
         for (int index = cached.scanned; index < descriptors.size(); index++)
@@ -43,7 +49,7 @@ public final class CloudworksResourceSymbols {
 
     private static final class IngredientMatches {
         int scanned;
-        final it.unimi.dsi.fastutil.ints.IntArrayList accepted = new it.unimi.dsi.fastutil.ints.IntArrayList();
+        final IntArrayList accepted = new IntArrayList();
     }
 
     /**
@@ -118,10 +124,10 @@ public final class CloudworksResourceSymbols {
      * so it is independent of the dictionary generation; the registry and recipe
      * versions invalidate it whenever recipes, layouts or adapters are re-registered.
      */
-    public Optional<mekanism.cloudworks.common.recipe.CloudworksFrozenRecipeView> cachedFreeze(
-            String cacheKey, mekanism.cloudworks.api.CloudworksMachineAdapter adapter) {
-        long registryVersion = mekanism.cloudworks.common.registry.CloudworksRegistries.version();
-        int recipeVersion = mekanism.common.recipe.RecipeHandler.getGlobalRecipeVersion();
+    public Optional<CloudworksFrozenRecipeView> cachedFreeze(
+            String cacheKey, CloudworksMachineAdapter adapter) {
+        long registryVersion = CloudworksRegistries.version();
+        int recipeVersion = RecipeHandler.getGlobalRecipeVersion();
         synchronized (this) {
             FrozenCacheEntry cached = freezeCache.get(cacheKey);
             if (cached != null && cached.registryVersion == registryVersion && cached.recipeVersion == recipeVersion) {
@@ -129,34 +135,8 @@ public final class CloudworksResourceSymbols {
                 return Optional.of(cached.view);
             }
         }
-        Optional<mekanism.cloudworks.common.recipe.CloudworksFrozenRecipeView> view =
+        Optional<CloudworksFrozenRecipeView> view =
                 CloudworksNativeContracts.view(adapter);
-        synchronized (this) {
-            if (view.isPresent())
-                freezeCache.put(cacheKey, new FrozenCacheEntry(registryVersion, recipeVersion, view.get()));
-            freezeMisses++;
-        }
-        return view;
-    }
-
-    /**
-     * Session cache for one special adapter's frozen view (fuel generators).
-     * Same invalidation rules as {@link #cachedFreeze}; keyed by machine key
-     * and the special adapter's class name.
-     */
-    public Optional<mekanism.cloudworks.common.recipe.CloudworksFrozenRecipeView> cachedFreezeSpecial(
-            String cacheKey, mekanism.cloudworks.common.recipe.SpecialMachineAdapter special) {
-        long registryVersion = mekanism.cloudworks.common.registry.CloudworksRegistries.version();
-        int recipeVersion = mekanism.common.recipe.RecipeHandler.getGlobalRecipeVersion();
-        synchronized (this) {
-            FrozenCacheEntry cached = freezeCache.get(cacheKey);
-            if (cached != null && cached.registryVersion == registryVersion && cached.recipeVersion == recipeVersion) {
-                freezeHits++;
-                return Optional.of(cached.view);
-            }
-        }
-        Optional<mekanism.cloudworks.common.recipe.CloudworksFrozenRecipeView> view =
-                CloudworksNativeContracts.special(special);
         synchronized (this) {
             if (view.isPresent())
                 freezeCache.put(cacheKey, new FrozenCacheEntry(registryVersion, recipeVersion, view.get()));
@@ -182,10 +162,10 @@ public final class CloudworksResourceSymbols {
     private static final class FrozenCacheEntry {
         final long registryVersion;
         final int recipeVersion;
-        final mekanism.cloudworks.common.recipe.CloudworksFrozenRecipeView view;
+        final CloudworksFrozenRecipeView view;
 
         FrozenCacheEntry(long registryVersion, int recipeVersion,
-                         mekanism.cloudworks.common.recipe.CloudworksFrozenRecipeView view) {
+                         CloudworksFrozenRecipeView view) {
             this.registryVersion = registryVersion;
             this.recipeVersion = recipeVersion;
             this.view = view;

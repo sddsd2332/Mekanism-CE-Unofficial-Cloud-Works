@@ -1,6 +1,0 @@
-{
-  "parent": "cloudworks:item/standard_item",
-  "textures": {
-    "layer0": "cloudworks:items/cloud_nether_environment_card"
-  }
-}

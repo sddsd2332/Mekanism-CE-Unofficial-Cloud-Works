@@ -3,6 +3,7 @@ package mekanism.cloudworks.common.content;
 import mekanism.api.inventory.IInventorySlot;
 
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Host of the five terminal functional slots ({@link CloudworksTerminalSlots}):
@@ -10,9 +11,9 @@ import java.util.List;
  * tile NBT. Cloud transfers journal the resulting slot projection separately.
  */
 public interface CloudworksTerminalHost {
-    java.util.UUID terminalId();
-    default java.util.UUID appliedTerminalTransfer() { return null; }
-    default void acknowledgeTerminalTransfer(java.util.UUID transferId) { }
+    UUID terminalId();
+    default UUID appliedTerminalTransfer() { return null; }
+    default void acknowledgeTerminalTransfer(UUID transferId) { }
 
     /** A detached or replaced physical host cannot receive a journal projection. */
     default boolean available() { return true; }
@@ -22,6 +23,9 @@ public interface CloudworksTerminalHost {
 
     /** Nonblocking confirmation; a queued chunk save is not a durable acknowledgement. */
     default boolean identityDurable() { return true; }
+
+    /** Team terminal items may retarget after the old domain's durable transfer is acknowledged. */
+    default boolean allowsOwnerChange() { return false; }
 
     /**
      * Exactly five slots in the contract order: machine in, machine out,

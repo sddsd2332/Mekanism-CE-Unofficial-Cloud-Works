@@ -1,16 +1,22 @@
 package mekanism.cloudworks.common.recipe;
 
-import java.util.Collections;
+import java.util.*;
 import mekanism.api.gas.GasStack;
+import mekanism.api.qio.resource.QIOResourceCodecs;
+import mekanism.cloudworks.api.machine.*;
+import mekanism.cloudworks.api.recipe.CloudworksRecipeSpec;
 import mekanism.common.MekanismFluids;
 import mekanism.common.content.sps.SynchronizedSPSData;
 
-public final class CloudworksSPSRecipeAdapter extends CloudworksMultiblockRecipeAdapter {
+/** Both builtin and CRT SPS use the native energy/input conversion and prepaid progress. */
+public final class CloudworksSPSRecipeAdapter implements CloudworksMachineAdapter {
     public CloudworksSPSRecipeAdapter(int ticks) {
-        super(Collections.singletonList(new CloudworksContractRecipeAdapter.Contract("sps",
-                new CloudworksRecipeBatch()
-                        .gas(new GasStack(MekanismFluids.Polonium, 1), SynchronizedSPSData.INPUT_PER_ANTIMATTER, "gas_input")
-                        .output(new GasStack(MekanismFluids.Antimatter, 1), "gas_output")
-                        .extraEnergy(SynchronizedSPSData.ENERGY_PER_INPUT * SynchronizedSPSData.INPUT_PER_ANTIMATTER / ticks), ticks)));
+        if (ticks < 1) throw new IllegalArgumentException("Invalid SPS compatibility duration");
+    }
+    @Override public List<CloudworksRecipeSpec> freeze(CloudworksMachineRegistration registration) {
+        return Collections.singletonList(CloudworksRecipeSpec.builder("cloudworks:sps").duration(1)
+                .input(QIOResourceCodecs.gas(new GasStack(MekanismFluids.Polonium, 1)), 1, "gas_input")
+                .unscaledOutput(QIOResourceCodecs.gas(new GasStack(MekanismFluids.Antimatter, 1)), 1, "gas_output")
+                .powerDriven(SynchronizedSPSData.ENERGY_PER_INPUT, SynchronizedSPSData.INPUT_PER_ANTIMATTER).build());
     }
 }

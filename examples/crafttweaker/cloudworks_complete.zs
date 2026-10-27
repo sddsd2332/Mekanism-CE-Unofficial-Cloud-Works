@@ -17,6 +17,71 @@ import mods.cloudworks.Recipes;
 import mods.cloudworks.Generators;
 import mods.cloudworks.Multiblocks;
 import mods.cloudworks.Thermal;
+import mods.cloudworks.Upgrades;
+import mods.cloudworks.LootDrops;
+import mods.cloudworks.Pumps;
+import mods.cloudworks.Storage;
+import crafttweaker.player.IPlayer;
+import crafttweaker.item.IItemStack;
+
+// Call explicitly to replace the shared defaults; see cloudworks_pumps.zs for a standalone script.
+function cloudworksPumpRulesExample() {
+    Pumps.remove("cloudworks:pump_water");
+    Pumps.biome("cloudworks_example:ocean_water", "minecraft:ocean", <liquid:water> * 1000, 20, 100, "native_water", "without");
+    Pumps.remove("cloudworks:pump_lava");
+    Pumps.add("cloudworks_example:nether_lava", "cloudworks:nether_heat_source", <liquid:lava> * 1000, 20, 100, "fixed", "any");
+}
+
+// Runtime reward helpers. These functions are not called by loading this example.
+// The pack owns ingredient consumption and exactly-once reward delivery.
+// terminalItemUploadsEnabled only gates terminals, not these trusted deposits.
+function rewardCloudMachines(player as IPlayer, supportedMachine as IItemStack) {
+    val request = Storage.addMachine(player, supportedMachine, 4);
+    // Poll request.done from a later server callback before inspecting accepted/error.
+    // Do not block the server thread or resend a request while it is still pending.
+}
+
+function rewardCloudSpeed(player as IPlayer) {
+    val request = Storage.addUpgradeType(player, "speed", 8);
+    // Custom ids: Storage.addUpgradeType(player, "addonmod:module", 1);
+    // Item binding: Storage.addUpgrade(player, Upgrades.getItem("energy"), 8);
+    // Team cloud: Storage.addMachineTo(player, ownerUuid, supportedMachine, 4);
+}
+
+// External MMCE-style transfer: the pack must debit/credit its own IO inventory.
+function mmceCloudTransfer(player as IPlayer, machine as IItemStack) {
+    val upload = Storage.uploadMachine(player, machine, 1);
+    val download = Storage.downloadMachine(player, machine, 1);
+    // Poll upload.done/download.done later. For a successful download, move
+    // download.machines into the MMCE output inventory; CloudWorks never does it.
+}
+// Normal output() and chanceOutput() use the owner's cloud output multiplier.
+// Declare container returns with unscaledOutput(resource[, port]).
+// Conserved conversion recipes call unscaledOutputs() on the builder.
+
+// Line pools default to cloudworks speed_module/energy_module. Mek upgrades are node CUSTOM modules.
+// Optional item replacement does not change axis curves. Final bindings must not collide with CUSTOM items.
+// Upload and download use exactly the same item, metadata and NBT identity.
+// Existing numeric pool balances remain, and are withdrawn as the current item.
+// Upgrades.setItem("speed", <minecraft:paper>.withTag({cloudUpgrade: "speed"}));
+// Upgrades.setItem("energy", <minecraft:paper>.withTag({cloudUpgrade: "energy"}));
+// useNativeItem("speed") conflicts when the same Mek item is already bound to its node module.
+// Upgrades.getItem("energy");
+
+// -----------------------------------------------------------------------------
+// Probability drops layered on the frozen entity/chest loot results
+// -----------------------------------------------------------------------------
+// These are startup declarations. They do not rewrite loot JSON and never merge
+// equal item stacks; each entity/axis declaration keeps its own probability.
+// LootDrops.entity("minecraft:zombie", <minecraft:diamond>, 0.05);
+// LootDrops.entityRange("minecraft:skeleton", <minecraft:bone>, 1, 2, 0.25);
+// LootDrops.entityMeta("minecraft:zombie", <minecraft:coal>, 1, 1, 3, 0.10);
+//
+// Axis declarations roll per simulated entity kill and per declared chest-table
+// event. A multi-table structure gets one independent axis roll for each table.
+// LootDrops.axis("cloudworks:nether_fortress", <minecraft:emerald>, 0.01);
+// LootDrops.axisRange("cloudworks:nether_fortress", <minecraft:gold_ingot>, 1, 2, 0.05);
+// LootDrops.axisMeta("cloudworks:nether_fortress", <minecraft:coal>, 1, 1, 2, 0.05);
 
 // -----------------------------------------------------------------------------
 // Built-in coverage (automatic; this is a coverage index, not duplicate calls)
@@ -49,7 +114,9 @@ import mods.cloudworks.Thermal;
 // MultiblockMachine (when installed): Large Chemical Infuser, Large Chemical Washer,
 // Large Electrolytic Separator, Large Solar Neutron Activator, Large Wind Generator
 // and Large Gas Generator.
-// The fixed defaults total 198 identities when every optional dependency is
+// Four tiered electric pumps bring MoreMachine to 79 identities (19 tier families plus 3 replicators).
+// Mek also includes the pump, power-driven SPS and manual ore converter; Generators includes bio and fusion.
+// The fixed defaults total 207 identities when every optional dependency is
 // present. Runtime recipe contents are read from the installed mods; this script
 // intentionally does not freeze a second, potentially stale recipe list.
 
@@ -59,13 +126,24 @@ import mods.cloudworks.Thermal;
 val demoProcessor = <minecraft:stick>.withTag({cloudworksExample: "processor"});
 val processorSlots = Slots.create()
     .input("item_input", "mekanism:item_stack", 64)
+    .recipeFilteredInput("item_input", true) // default: accept declared recipe inputs
     .input("catalyst_input", "mekanism:item_stack", 64)
     .template("item_template", "mekanism:item_stack", 64)
     .output("item_output", "mekanism:item_stack", 64)
-    .add("single_link_input", "mekanism:item_stack", "INPUT", 64, false);
+    .add("single_link_input", "mekanism:item_stack", "INPUT", 64, false)
+    .recipeFilteredInput("single_link_input", false); // generic consumables; independent of the link limit
 
 Machines.register(demoProcessor, 1, 10.0, 64000.0, 40, processorSlots);
 Machines.setProfile(demoProcessor, 2, 12.0, 96000.0, 40);
+// 2 is a per-machine upper bound. Smaller batches and different recipes can run independently.
+// Additional opt-in recipe contracts:
+// Recipes.create("pack:cycle", 20).operationsPerCycle(4)...
+// Recipes.create("pack:powered", 1).input(oneExactInput).unscaledOutput(oneUnitOutput).powerDriven(1000000.0, 1000)...
+// Recipes.create("pack:secondary", 20).secondaryFuelInputs(true, false)... // marks existing gas inputs
+// Recipes.create("pack:fuel", 1).input(oneExactFuel).prepaidFuel(canonicalFuel, 200, 5.0)... // joules per credit unit
+// Builtin/CRT SPS share power-driven processing without output multipliers; ticks is retained for API compatibility.
+// Configure ore targets in the node editor; no physical template port or startup script overriding player rules.
+Machines.setLineUpgradePolicy(demoProcessor, 8, 8); // line units per physical machine; zero refuses an axis
 
 // ingredient() snapshots the current ore-dictionary matches at startup.
 Recipes.create("cloudworks_example:ore_processor", 40)

@@ -9,6 +9,7 @@ import mekanism.client.gui.element.slot.GuiVirtualSlot;
 import mekanism.client.gui.element.slot.SlotType;
 import mekanism.client.gui.element.window.GuiWindow;
 import mekanism.cloudworks.client.gui.element.GuiCloudSlotScroll;
+import mekanism.cloudworks.client.gui.element.tab.GuiCloudMachineTypesTab;
 import mekanism.cloudworks.common.content.CloudworksWindowTypes;
 import mekanism.cloudworks.common.inventory.ContainerCloudworks;
 import mekanism.cloudworks.common.network.CloudworksNetwork.Operation;
@@ -18,10 +19,11 @@ import mekanism.common.inventory.ISlotClickHandler.IScrollableSlot;
 import mekanism.common.inventory.container.SelectedWindowData;
 import mekanism.common.util.LangUtils;
 import net.minecraft.client.gui.GuiScreen;
-import net.minecraft.item.ItemStack;
 import net.minecraft.util.text.TextComponentString;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
+import mekanism.cloudworks.common.content.CloudworksTerminalSlots;
+import mekanism.common.inventory.container.slot.VirtualInventoryContainerSlot;
 
 /**
  * Machine cache view: machine types, NBT variants, and the two terminal
@@ -39,6 +41,8 @@ public class GuiCloudCacheWindow extends GuiWindow {
     private final ContainerCloudworks container;
     private final MekanismButton uploadButton;
     private final MekanismButton downloadButton;
+    private GuiCloudMachineTypesTab machineTypesTab;
+    private GuiCloudMachineTypesWindow machineTypesWindow;
     private int selectedType = -1;
     private int selectedVariant = -1;
 
@@ -46,6 +50,12 @@ public class GuiCloudCacheWindow extends GuiWindow {
         super(gui, x, y, W, H, new SelectedWindowData(CloudworksWindowTypes.CLOUD_CACHE));
         this.container = container;
         interactionStrategy = InteractionStrategy.ALL;
+        machineTypesTab = addChild(new GuiCloudMachineTypesTab(gui(), relativeX - 26, relativeY + 22,
+                () -> machineTypesTab, () -> this,
+                window -> machineTypesWindow = window,
+                window -> {
+                    if (machineTypesWindow == window) machineTypesWindow = null;
+                }));
 
         addChild(new GuiCloudSlotScroll(gui, relativeX + 8, relativeY + LIST_Y,
                 LIST_COLUMNS, LIST_ROWS, this::typeSlots, this::selectType, () -> selectedType,
@@ -66,7 +76,7 @@ public class GuiCloudCacheWindow extends GuiWindow {
     }
 
     private void addTerminalSlot(int index, int x, int y) {
-        mekanism.common.inventory.container.slot.VirtualInventoryContainerSlot slot = container.getTerminalSlot(index);
+        VirtualInventoryContainerSlot slot = container.getTerminalSlot(index);
         if (slot != null) {
             addChild(new GuiVirtualSlot(this, SlotType.NORMAL, gui(), x, y, slot));
         }
@@ -154,9 +164,10 @@ public class GuiCloudCacheWindow extends GuiWindow {
     @Override
     public void tick() {
         super.tick();
-        mekanism.common.inventory.container.slot.VirtualInventoryContainerSlot uploadSlot =
+        VirtualInventoryContainerSlot uploadSlot =
                 container.getTerminalSlot(ContainerCloudworks.SLOT_MACHINE_IN);
-        uploadButton.active = uploadSlot != null && !uploadSlot.getStackToRender().isEmpty();
+        uploadButton.active = CloudworksTerminalSlots.uploadsEnabled()
+                && uploadSlot != null && !uploadSlot.getStackToRender().isEmpty();
         if (selectedType >= cacheTypes().size()) {
             selectedType = -1;
             selectedVariant = -1;
@@ -169,6 +180,8 @@ public class GuiCloudCacheWindow extends GuiWindow {
 
     @Override
     public void close() {
+        GuiCloudMachineTypesWindow child = machineTypesWindow;
+        if (child != null) child.close();
         container.sendAction(Operation.CACHE_VIEW, null, "-1");
         super.close();
     }

@@ -28,6 +28,10 @@ public class ContainerCloudInputPort extends MekanismTileContainer<TileEntityClo
         super(tile, inventory);
     }
 
+    @Override public boolean canInteractWith(@Nonnull EntityPlayer player) {
+        return tile != null && tile.isUsableByPlayer(player) && tile.canPlayerAccess(player);
+    }
+
     @Override
     protected void addSlots() {
         super.addSlots();
@@ -73,6 +77,7 @@ public class ContainerCloudInputPort extends MekanismTileContainer<TileEntityClo
     @Nonnull
     @Override
     public ItemStack slotClick(int slotId, int dragType, ClickType clickType, EntityPlayer player) {
+        if (!canInteractWith(player)) return ItemStack.EMPTY;
         if (slotId >= 0 && slotId < inventorySlots.size()) {
             Slot slot = inventorySlots.get(slotId);
             if (slot instanceof PortInputContainerSlot portSlot) {

@@ -46,6 +46,11 @@ public final class CloudworksWindowTypes {
     public static final SelectedWindowData.WindowType CLOUD_CACHE = SelectedWindowData.WindowType.register(
             new ResourceLocation("cloudworks", "cloud_cache"), "cloudworks_cloud_cache", true);
     /**
+     * 云端总览·机器上传支持类型目录.
+     */
+    public static final SelectedWindowData.WindowType CLOUD_MACHINE_TYPES = SelectedWindowData.WindowType.register(
+            new ResourceLocation("cloudworks", "cloud_machine_types"), "cloudworks_cloud_machine_types", true);
+    /**
      * 云端总览·三仓查看窗.
      */
     public static final SelectedWindowData.WindowType CLOUD_WAREHOUSES = SelectedWindowData.WindowType.register(
@@ -70,6 +75,14 @@ public final class CloudworksWindowTypes {
             new ResourceLocation("cloudworks", "cloud_upgrade"), "cloudworks_cloud_upgrade", true);
     public static final SelectedWindowData.WindowType CLOUD_STATUS = SelectedWindowData.WindowType.register(
             new ResourceLocation("cloudworks", "cloud_status"), "cloudworks_cloud_status", true);
+    public static final SelectedWindowData.WindowType CLOUD_TEAM = SelectedWindowData.WindowType.register(
+            new ResourceLocation("cloudworks", "cloud_team"), "cloudworks_cloud_team", true);
+    public static final SelectedWindowData.WindowType CLOUD_TEAM_REQUESTS = SelectedWindowData.WindowType.register(
+            new ResourceLocation("cloudworks", "cloud_team_requests"), "cloudworks_cloud_team_requests", false);
+    public static final SelectedWindowData.WindowType CLOUD_TEAM_OPERATIONS = SelectedWindowData.WindowType.register(
+            new ResourceLocation("cloudworks", "cloud_team_operations"), "cloudworks_cloud_team_operations", false);
+    public static final SelectedWindowData.WindowType CLOUD_TEAM_TRANSFER = SelectedWindowData.WindowType.register(
+            new ResourceLocation("cloudworks", "cloud_team_transfer"), "cloudworks_cloud_team_transfer", false);
 
 
     public static final SelectedWindowData CLOUD_CACHE_DATA = new SelectedWindowData(CLOUD_CACHE);
@@ -91,6 +104,7 @@ public final class CloudworksWindowTypes {
     public static final SelectedWindowData.WindowType LINE_MACHINE_USAGE = lineWindow("machine_usage");
     public static final SelectedWindowData.WindowType LINE_BLUEPRINTS = lineWindow("blueprints");
     public static final SelectedWindowData.WindowType LINE_BLUEPRINT_NEEDS = lineWindow("blueprint_needs");
+    public static final SelectedWindowData.WindowType LINE_PALETTE = lineWindow("palette");
 
     private static SelectedWindowData.WindowType lineWindow(String name) {
         return SelectedWindowData.WindowType.register(new ResourceLocation("cloudworks", "line_" + name),

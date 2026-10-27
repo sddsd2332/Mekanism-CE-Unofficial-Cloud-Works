@@ -9,12 +9,9 @@ import crafttweaker.api.item.IIngredient;
 import crafttweaker.api.item.IItemStack;
 import crafttweaker.api.liquid.ILiquidStack;
 import crafttweaker.api.minecraft.CraftTweakerMC;
-import mekanism.api.infuse.InfuseRegistry;
-import mekanism.api.infuse.InfuseType;
 import mekanism.api.qio.resource.QIOResourceCodecs;
 import mekanism.api.qio.resource.QIOResourceDescriptor;
-import mekanism.cloudworks.common.recipe.CloudworksInfuseResourceCodec;
-import mekanism.common.InfuseStorage;
+import mekanism.cloudworks.api.CloudworksInfuseResourceCodec;
 import mekanism.common.integration.crafttweaker.gas.IGasStack;
 import mekanism.common.integration.crafttweaker.helpers.GasHelper;
 import net.minecraft.item.ItemStack;
@@ -25,6 +22,7 @@ import net.minecraftforge.oredict.OreDictionary;
 import stanhebben.zenscript.annotations.ZenClass;
 import stanhebben.zenscript.annotations.ZenGetter;
 import stanhebben.zenscript.annotations.ZenMethod;
+import java.util.Objects;
 
 @ZenClass("mods.cloudworks.Resources")
 @ZenRegister
@@ -56,21 +54,19 @@ public final class CloudworksResources {
 
     @ZenMethod
     public static CloudworksResources fluid(ILiquidStack liquid) {
-        java.util.Objects.requireNonNull(liquid);
+        Objects.requireNonNull(liquid);
         return of(QIOResourceCodecs.fluid(CraftTweakerMC.getLiquidStack(liquid)), liquid.getAmount());
     }
 
     @ZenMethod
     public static CloudworksResources gas(IGasStack gas) {
-        java.util.Objects.requireNonNull(gas);
-        return of(QIOResourceCodecs.gas(java.util.Objects.requireNonNull(GasHelper.toGas(gas))), gas.getAmount());
+        Objects.requireNonNull(gas);
+        return of(QIOResourceCodecs.gas(Objects.requireNonNull(GasHelper.toGas(gas))), gas.getAmount());
     }
 
     @ZenMethod
     public static CloudworksResources infuse(String name, long amount) {
-        InfuseType type = InfuseRegistry.get(name.toUpperCase(java.util.Locale.ROOT));
-        if (type == null) throw new IllegalArgumentException("Unknown infusion type: " + name);
-        return of(CloudworksInfuseResourceCodec.descriptor(new InfuseStorage(type, 1)), amount);
+        return of(CloudworksInfuseResourceCodec.descriptor(name), amount);
     }
 
     @ZenMethod

@@ -9,33 +9,45 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
+import mekanism.cloudworks.api.node.CloudworksPortDefinition;
 
 /**
  * Virtual line boundary with per-resource replenishment targets and a durable local buffer.
  */
 public final class CloudworksChannelNode {
+    public static final int MAX_CONFIG_CHARS = 8192;
     private final UUID id;
     private final Mode mode;
+    private final String archetypeId;
     private final Map<QIOResourceDescriptor, Long> resources = new LinkedHashMap<>();
     private CloudworksInventory buffer;
     private int x, z;
     private boolean enabled = true;
     private UUID waitingBlueprint;
+    /** Special-node configuration compound (9.1 deepening); empty for plain channels. */
+    private NBTTagCompound config = new NBTTagCompound();
     public CloudworksChannelNode(UUID id, Mode mode, long capacity) {
+        this(id, mode, capacity, "");
+    }
+
+    public CloudworksChannelNode(UUID id, Mode mode, long capacity, String archetypeId) {
         if (id == null || mode == null) throw new IllegalArgumentException("Invalid channel");
+        if (archetypeId == null || archetypeId.length() > 128) throw new IllegalArgumentException("Invalid special node");
         this.id = id;
         this.mode = mode;
+        this.archetypeId = archetypeId;
         buffer = new CloudworksInventory(capacity);
     }
 
     public CloudworksChannelNode copyForRuntime() {
-        CloudworksChannelNode copy = new CloudworksChannelNode(id, mode, buffer.capacity());
+        CloudworksChannelNode copy = new CloudworksChannelNode(id, mode, buffer.capacity(), archetypeId);
         copy.resources.putAll(resources);
         copy.buffer = buffer.copy();
         copy.x = x;
         copy.z = z;
         copy.enabled = enabled;
         copy.waitingBlueprint = waitingBlueprint;
+        copy.config = config.copy();
         return copy;
     }
 
@@ -48,7 +60,8 @@ public final class CloudworksChannelNode {
         CloudworksDataChecks.schema(tag, 1);
         CloudworksInventory buffer = CloudworksInventory.read(tag.getCompoundTag("buffer"));
         CloudworksChannelNode node = new CloudworksChannelNode(UUID.fromString(tag.getString("id")),
-                Mode.valueOf(tag.getString("mode")), buffer.capacity());
+                Mode.valueOf(tag.getString("mode")), buffer.capacity(),
+                tag.hasKey("archetype", NBT.TAG_STRING) ? tag.getString("archetype") : "");
         node.buffer = buffer;
         node.enabled = tag.getBoolean("enabled");
         if (tag.hasKey("waitingBlueprint")) {
@@ -57,6 +70,13 @@ public final class CloudworksChannelNode {
         }
         node.x = tag.getInteger("x");
         node.z = tag.getInteger("z");
+        if (tag.hasKey("config", NBT.TAG_COMPOUND)) {
+            // Size guard: the config is addon-owned data on a special node; a
+            // hostile or corrupted compound must not blow up the line file.
+            NBTTagCompound stored = tag.getCompoundTag("config");
+            if (stored.toString().length() <= MAX_CONFIG_CHARS) node.config = stored.copy();
+            else throw new IllegalArgumentException("Special node configuration too large");
+        }
         NBTTagList list = CloudworksDataChecks.list(tag, "resources", NBT.TAG_COMPOUND);
         for (int i = 0; i < list.tagCount(); i++) {
             NBTTagCompound entry = list.getCompoundTagAt(i);
@@ -76,6 +96,26 @@ public final class CloudworksChannelNode {
 
     public Mode mode() {
         return mode;
+    }
+
+    public String archetypeId() {
+        return archetypeId;
+    }
+
+    public boolean special() {
+        return !archetypeId.isEmpty();
+    }
+
+    /** Live configuration compound for special nodes; empty for plain channels. */
+    public NBTTagCompound config() {
+        return config;
+    }
+
+    /** Replaces the configuration compound; null normalizes to empty. */
+    public void setConfig(NBTTagCompound value) {
+        if (value != null && value.toString().length() > MAX_CONFIG_CHARS)
+            throw new IllegalArgumentException("Special node configuration too large");
+        config = value == null ? new NBTTagCompound() : value.copy();
     }
 
     public boolean enabled() {
@@ -123,10 +163,16 @@ public final class CloudworksChannelNode {
         tag.setInteger("schema", 1);
         tag.setString("id", id.toString());
         tag.setString("mode", mode.name());
+        if (!archetypeId.isEmpty()) tag.setString("archetype", archetypeId);
         tag.setBoolean("enabled", enabled);
         if (waitingBlueprint != null) tag.setString("waitingBlueprint", waitingBlueprint.toString());
         tag.setInteger("x", x);
         tag.setInteger("z", z);
+        if (!config.getKeySet().isEmpty()) {
+            if (config.toString().length() > MAX_CONFIG_CHARS)
+                throw new IllegalStateException("Special node configuration too large");
+            tag.setTag("config", config.copy());
+        }
         tag.setTag("buffer", buffer.write());
         NBTTagList list = new NBTTagList();
         resources.forEach((descriptor, amount) -> {
@@ -148,6 +194,25 @@ public final class CloudworksChannelNode {
 
         public boolean transfer() {
             return this == TRANSFER_INPUT || this == TRANSFER_OUTPUT;
+        }
+
+        /** Additional boundary-pair restriction; null represents a machine or an addon-defined node. */
+        public static boolean allowsDirectLink(Mode source, Mode target) {
+            return !(source == TRANSFER_INPUT && target == TRANSFER_OUTPUT
+                    || source == TRANSFER_OUTPUT && target == TRANSFER_INPUT);
+        }
+
+        /**
+         * The mode's API port shape (8.1 closeout): the mode-to-capability
+         * mapping lives here, on the owning data, so the API contract stays
+         * free of internal types. This is the single derivation point for
+         * editor canvas, topology validator and Runtime compiler.
+         */
+        public CloudworksPortDefinition port(String codecId) {
+            boolean canOutput = this != SEND_OUTPUT;
+            boolean canInput = this != RECEIVE_INPUT;
+            boolean outputAnchor = this == RECEIVE_INPUT || this == TRANSFER_INPUT;
+            return CloudworksPortDefinition.channel(codecId, canOutput, canInput, outputAnchor);
         }
     }
 }

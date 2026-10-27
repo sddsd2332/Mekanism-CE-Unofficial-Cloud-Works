@@ -24,6 +24,8 @@ public final class CloudworksContractRecipeAdapter extends CloudworksNativeRecip
     @Override
     protected int duration(Contract recipe, int fallback) { return recipe.ticks; }
 
+    @Override protected String recipeIdentity(Contract recipe) { return recipe.id; }
+
     public static final class Contract {
         public final String id;
         public final CloudworksRecipeBatch batch;

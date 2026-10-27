@@ -10,10 +10,11 @@ import mekanism.cloudworks.common.network.CloudworksNetwork.Operation;
 import mekanism.cloudworks.common.network.data.CloudworksGuiData.Choices;
 import mekanism.cloudworks.common.network.data.CloudworksLineDraft;
 import mekanism.cloudworks.common.registry.CloudworksRegistries;
-import mekanism.cloudworks.common.slot.MachineSlotLayout;
+import mekanism.cloudworks.api.machine.MachineSlotLayout;
 import mekanism.cloudworks.client.gui.element.GuiCloudQIOResourceGrid.Entry;
 import mekanism.common.inventory.container.SelectedWindowData;
 import net.minecraft.util.text.TextComponentString;
+import mekanism.cloudworks.common.registry.CloudworksNodeMechanisms;
 
 public final class GuiLineLinkWindow extends GuiLineWindow {
     private static final SelectedWindowData.WindowType TYPE = type("link");
@@ -39,7 +40,8 @@ public final class GuiLineLinkWindow extends GuiLineWindow {
         priority.setText(Integer.toString(wire.priority));
         ratio.setText(Double.toString(wire.ratio));
         addChild(new GuiLineResourceGrid(gui, relativeX + 8, relativeY + 63, 9, 4,
-                () -> filters, descriptor -> selected = descriptor, this::removeFilter, this::addFilter));
+                () -> filters, () -> selected, descriptor -> selected = descriptor,
+                this::removeFilter, this::addFilter));
         MekanismButton selectResources = addChild(new MekanismButton(gui, relativeX + 8, relativeY + 140, 90, 18,
                 new TextComponentString(tr("select_resources")), this::openPicker, null));
         selectResources.active = !wire.sourcePort.equals("heat_output");
@@ -87,7 +89,7 @@ public final class GuiLineLinkWindow extends GuiLineWindow {
                 return descriptor.getCodecId().toString().equals(wire.sourcePort);
         for (CloudworksLineDraft.Machine machine : draft.machines)
             if (machine.id.equals(wire.source)) {
-                MachineSlotLayout layout = CloudworksRegistries.slots(machine.type);
+                MachineSlotLayout layout = CloudworksNodeMechanisms.slots(machine);
                 MachineSlotLayout.Slot slot = layout == null ? null : layout.find(wire.sourcePort);
                 return slot != null && slot.codecId().equals(descriptor.getCodecId());
             }

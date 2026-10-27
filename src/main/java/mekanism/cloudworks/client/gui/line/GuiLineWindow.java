@@ -34,7 +34,8 @@ public abstract class GuiLineWindow extends GuiWindow {
     }
 
     public static String tr(String key) {
-        return LangUtils.localize("cloudworks.editor." + key);
+        return key.startsWith("cloudworks.") ? LangUtils.localize(key)
+                : LangUtils.localize("cloudworks.editor." + key);
     }
 
     @Override

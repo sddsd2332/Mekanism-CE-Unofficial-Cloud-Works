@@ -3,16 +3,18 @@ package mekanism.cloudworks.client.gui.line;
 import java.util.*;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
-import mekanism.api.qio.resource.QIOResourceCodecs;
 import mekanism.api.qio.resource.QIOResourceDescriptor;
 import mekanism.client.gui.IGuiWrapper;
 import mekanism.client.gui.element.text.GuiTextField;
+import mekanism.cloudworks.client.gui.element.CloudworksResourceIcon;
 import mekanism.cloudworks.client.gui.element.GuiCloudQIOResourceGrid.Entry;
 import mekanism.common.inventory.container.SelectedWindowData;
 import net.minecraft.util.text.TextComponentString;
 
 /** Catalog window layered above its owner; selection changes the local draft only. */
 public final class GuiLineResourcePickerWindow extends GuiLineWindow {
+    private static final int FILTER_INFUSE = 4;
+    private static final int FILTER_OTHER = 5;
     private static final SelectedWindowData.WindowType TYPE = type("resources");
     private CloudworksResourceCatalog catalog;
     private final GuiTextField search;
@@ -22,7 +24,7 @@ public final class GuiLineResourcePickerWindow extends GuiLineWindow {
     private final Set<QIOResourceDescriptor> extra = new LinkedHashSet<>();
     private final List<GuiLineResourceTypeTab> tabs = new ArrayList<>();
     private int filter, seenSize = -1, rebuildTicks;
-    private boolean extraChanged;
+    private boolean extraChanged, hasOtherResources;
     private String query = "";
 
     public GuiLineResourcePickerWindow(IGuiWrapper gui, Collection<QIOResourceDescriptor> extra,
@@ -42,9 +44,11 @@ public final class GuiLineResourcePickerWindow extends GuiLineWindow {
         };
         grid = addChild(new GuiLineResourceGrid(gui, relativeX + 8, relativeY + 45, 10, 7,
                 () -> shown, selectAllowed, null, selectAllowed));
-        String[] textures = {"button/inventory.png", "items.png", "fluids.png", "gases.png", "button/fuzzy.png"};
-        String[] labels = {"resources_all", "resources_item", "resources_fluid", "resources_gas", "resources_other"};
-        int[] colors = {0xFFE0E0E0, 0xFF7CCC90, 0xFF78B1E0, 0xFFE0C477, 0xFFD291BC};
+        String[] textures = {"button/inventory.png", "items.png", "fluids.png", "gases.png",
+                "upgrade.png", "button/fuzzy.png"};
+        String[] labels = {"resources_all", "resources_item", "resources_fluid", "resources_gas",
+                "resources_infuse", "resources_other"};
+        int[] colors = {0xFFE0E0E0, 0xFF7CCC90, 0xFF78B1E0, 0xFFE0C477, 0xFFE58A72, 0xFFD291BC};
         for (int i = 0; i < labels.length; i++) {
             final int index = i;
             tabs.add(addChild(new GuiLineResourceTypeTab(gui, relativeX - 26, relativeY + 2 + i * 28,
@@ -63,20 +67,18 @@ public final class GuiLineResourcePickerWindow extends GuiLineWindow {
     }
 
     private void updateTabs() {
-        for (int i = 0; i < tabs.size(); i++) tabs.get(i).visible = i != filter;
+        for (int i = 0; i < tabs.size(); i++)
+            tabs.get(i).visible = i != filter && (i != FILTER_OTHER || hasOtherResources);
     }
 
     private boolean matchesType(QIOResourceDescriptor descriptor) {
-        boolean item = descriptor.getCodecId().equals(QIOResourceCodecs.ITEM_STACK_ID);
-        boolean fluid = descriptor.getCodecId().equals(QIOResourceCodecs.FLUID_STACK_ID);
-        boolean gas = descriptor.getCodecId().equals(QIOResourceCodecs.GAS_STACK_ID);
-        return switch (filter) {
-            case 1 -> item;
-            case 2 -> fluid;
-            case 3 -> gas;
-            case 4 -> !item && !fluid && !gas;
-            default -> true;
-        };
+        CloudworksResourceIcon.Family family = CloudworksResourceIcon.family(descriptor);
+        if (filter == 1) return family == CloudworksResourceIcon.Family.ITEM;
+        if (filter == 2) return family == CloudworksResourceIcon.Family.FLUID;
+        if (filter == 3) return family == CloudworksResourceIcon.Family.GAS;
+        if (filter == FILTER_INFUSE) return family == CloudworksResourceIcon.Family.INFUSE;
+        if (filter == FILTER_OTHER) return family == CloudworksResourceIcon.Family.OTHER;
+        return true;
     }
 
     private void rebuild() {
@@ -84,6 +86,10 @@ public final class GuiLineResourcePickerWindow extends GuiLineWindow {
         List<QIOResourceDescriptor> matching = new ArrayList<>();
         Set<QIOResourceDescriptor> resources = new LinkedHashSet<>(catalog.resources());
         resources.addAll(extra);
+        hasOtherResources = resources.stream()
+                .anyMatch(resource -> CloudworksResourceIcon.family(resource) == CloudworksResourceIcon.Family.OTHER);
+        if (filter == FILTER_OTHER && !hasOtherResources) filter = 0;
+        updateTabs();
         for (QIOResourceDescriptor resource : resources) {
             if (!allowed.test(resource) || !matchesType(resource)) continue;
             String name = catalog.displayName(resource);
@@ -117,7 +123,8 @@ public final class GuiLineResourcePickerWindow extends GuiLineWindow {
     @Override
     public void renderForeground(int mouseX, int mouseY) {
         super.renderForeground(mouseX, mouseY);
-        String[] labels = {"resources_all", "resources_item", "resources_fluid", "resources_gas", "resources_other"};
+        String[] labels = {"resources_all", "resources_item", "resources_fluid", "resources_gas",
+                "resources_infuse", "resources_other"};
         drawScrollingString(new TextComponentString(tr(labels[filter]) + ": " + shown.size()),
                 8, 173, TextAlignment.LEFT, 0x404040, 198, 2, false);
     }

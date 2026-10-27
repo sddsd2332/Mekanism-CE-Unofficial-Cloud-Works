@@ -17,12 +17,14 @@ import mekanism.cloudworks.common.network.PacketCloudworksBlueprint;
 import mekanism.cloudworks.common.network.PacketCloudworksBlueprint.Metadata;
 import mekanism.cloudworks.common.network.data.CloudworksGuiData;
 import net.minecraft.util.text.TextComponentString;
+import mekanism.cloudworks.common.network.data.CloudworksLineDraft;
+import mekanism.common.util.LangUtils;
 
 /** The single library/import entry point, with a shared read-only line canvas. */
 public final class GuiLineBlueprintWindow extends GuiLineWindow {
     private final ContainerCloudworks container;
     private final UUID line;
-    private final boolean canPlace;
+    private boolean canPlace;
     private final Consumer<CloudworksBlueprint> place;
     private final GuiTextField playerFilter, nameFilter, code;
     private final GuiTextScrollList list;
@@ -55,7 +57,8 @@ public final class GuiLineBlueprintWindow extends GuiLineWindow {
                 leftWidth, height - 90, this::selectBlueprint));
         preview = addChild(new GuiLineCanvas(gui, relativeX + leftWidth + 12, relativeY + 59,
                 width - leftWidth - 20, height - 114, new CloudworksViewport(), previewModel,
-                () -> previewModel.draft, () -> CloudworksGuiData.EMPTY.graph, () -> false, () -> {}, () -> -1));
+                () -> previewModel.draft, () -> CloudworksGuiData.EMPTY.graph, () -> false,
+                ignored -> {}, ignored -> {}, () -> -1));
         preview.preview(true);
         markers = addChild(new GuiCloudQIOResourceGrid(gui, relativeX + leftWidth + 12, relativeY + height - 51,
                 Math.min(10, Math.max(1, (width - leftWidth - 30) / 18)), 1, () -> {
@@ -82,6 +85,13 @@ public final class GuiLineBlueprintWindow extends GuiLineWindow {
         version = container.blueprintVersion();
         requestList(0);
         updateVisibility();
+    }
+
+    public void setCanPlace(boolean canPlace) {
+        if (this.canPlace != canPlace) {
+            this.canPlace = canPlace;
+            updatePlacementControls();
+        }
     }
 
     private void request(int operation, UUID entry, String text) {
@@ -162,7 +172,7 @@ public final class GuiLineBlueprintWindow extends GuiLineWindow {
             version = container.blueprintVersion();
             PacketCloudworksBlueprint.Result result = container.blueprintResult;
             if (!result.error.isEmpty()) {
-                feedback = mekanism.common.util.LangUtils.localize(result.error);
+                feedback = LangUtils.localize(result.error);
                 if (result.operation == PacketCloudworksBlueprint.PARSE
                         || result.operation == PacketCloudworksBlueprint.PRECHECK) placing = false;
             }
@@ -184,26 +194,32 @@ public final class GuiLineBlueprintWindow extends GuiLineWindow {
                     close();
                     return;
                 }
-                feedback = mekanism.common.util.LangUtils.localize("cloudworks.error.blueprint_invalid");
+                feedback = LangUtils.localize("cloudworks.error.blueprint_invalid");
             } else if (result.operation == PacketCloudworksBlueprint.DELETE) {
                 clearSelection(); requestList(0);
             }
         }
         filter();
+        updatePlacementControls();
         boolean ready = !container.blueprintBusy();
-        placeButton.active = canPlace && ready && selectedBlueprint != null;
         copy.active = ready && selectedBlueprint != null;
         Metadata entry = shown.stream().filter(value -> value.id.equals(selected)).findFirst().orElse(null);
         delete.visible = !pastePage && entry != null && entry.canDelete;
         delete.active = ready && entry != null;
-        parse.active = canPlace && ready && !code.getText().trim().isEmpty();
         mode.active = ready;
         list.active = ready;
     }
+
+    private void updatePlacementControls() {
+        boolean ready = !container.blueprintBusy();
+        placeButton.active = canPlace && ready && selectedBlueprint != null;
+        parse.active = canPlace && ready && !code.getText().trim().isEmpty();
+    }
     private static String summary(CloudworksBlueprint blueprint) {
-        mekanism.cloudworks.common.network.data.CloudworksLineDraft draft = blueprint.draft();
-        return mekanism.common.util.LangUtils.localizeWithFormat("cloudworks.editor.blueprint_summary",
-                draft.name, draft.machines.size() + draft.channels.size(), draft.links.size(), draft.channels.size());
+        CloudworksLineDraft draft = blueprint.draft();
+        return LangUtils.localizeWithFormat("cloudworks.editor.blueprint_summary",
+                draft.name, draft.machines.size() + draft.channels.size() + draft.auxiliaries.size(),
+                draft.links.size(), draft.channels.size());
     }
     @Override public void renderForeground(int mouseX, int mouseY) {
         super.renderForeground(mouseX, mouseY);

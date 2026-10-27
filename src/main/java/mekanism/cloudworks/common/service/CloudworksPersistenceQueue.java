@@ -8,6 +8,18 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
+import java.util.Objects;
+import java.util.Set;
+import mekanism.common.Mekanism;
+import net.minecraft.nbt.NBTTagList;
 
 /**
  * Single-owner bounded persistence pipeline. The main thread hands durable
@@ -33,23 +45,23 @@ public final class CloudworksPersistenceQueue implements AutoCloseable {
      * Serializes batch application between the worker thread and any external
      * applier (load-time replay); the submit path itself never applies.
      */
-    private final java.util.concurrent.locks.ReentrantLock applyLock =
-            new java.util.concurrent.locks.ReentrantLock(true);
+    private final ReentrantLock applyLock =
+            new ReentrantLock(true);
     /**
      * Refusals because the queue stayed full; diagnostics only.
      */
-    private final java.util.concurrent.atomic.AtomicLong busyRefusals =
-            new java.util.concurrent.atomic.AtomicLong();
+    private final AtomicLong busyRefusals =
+            new AtomicLong();
     private final Object idle = new Object();
     /**
      * Owners whose batches failed durably; their fault domain only. Lock-free: written on the IO thread, read anywhere.
      */
-    private final java.util.Set<UUID> failedOwners = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final Set<UUID> failedOwners = ConcurrentHashMap.newKeySet();
     /**
      * Batches dropped because their owner was already poisoned; diagnostics only.
      */
-    private final java.util.concurrent.atomic.AtomicLong droppedBatches =
-            new java.util.concurrent.atomic.AtomicLong();
+    private final AtomicLong droppedBatches =
+            new AtomicLong();
     private volatile boolean closed;
     private volatile boolean closing;
     private volatile boolean dead;
@@ -66,12 +78,12 @@ public final class CloudworksPersistenceQueue implements AutoCloseable {
     /**
      * Batches removed from the queue and not yet fully applied; guarded by {@link #idle}.
      */
-    private final java.util.concurrent.atomic.AtomicInteger activeBatches =
-            new java.util.concurrent.atomic.AtomicInteger();
-    private final java.util.concurrent.ConcurrentMap<UUID, java.util.concurrent.atomic.AtomicInteger> ownerBacklogs =
-            new java.util.concurrent.ConcurrentHashMap<>();
-    private final java.util.concurrent.atomic.AtomicInteger pendingSubmissions =
-            new java.util.concurrent.atomic.AtomicInteger();
+    private final AtomicInteger activeBatches =
+            new AtomicInteger();
+    private final ConcurrentMap<UUID, AtomicInteger> ownerBacklogs =
+            new ConcurrentHashMap<>();
+    private final AtomicInteger pendingSubmissions =
+            new AtomicInteger();
     CloudworksPersistenceQueue(int capacity, Sink sink, String threadName) {
         this.queue = new ArrayBlockingQueue<>(Math.max(1, capacity));
         this.sink = sink;
@@ -87,6 +99,11 @@ public final class CloudworksPersistenceQueue implements AutoCloseable {
      */
     void submitIntent(UUID owner, NBTTagCompound intent) {
         submit(new Batch(owner, intent, Collections.emptyList()));
+    }
+
+    /** Frozen value snapshots only: materialize on this ordered IO worker, before journaling. */
+    void submitDeferredIntent(UUID owner, Supplier<NBTTagCompound> intent) {
+        submit(new Batch(owner, Objects.requireNonNull(intent)));
     }
 
     /**
@@ -114,19 +131,19 @@ public final class CloudworksPersistenceQueue implements AutoCloseable {
      */
     void submitFilesBounded(UUID owner, long timeoutMillis, FileWrite... writes) {
         Batch batch = new Batch(owner, null, Arrays.asList(writes));
-        java.util.concurrent.atomic.AtomicInteger ownerCount;
+        AtomicInteger ownerCount;
         synchronized (idle) {
             if (closed || closing || dead) throw new IllegalStateException("Cloudworks persistence queue is closed");
             if (batch.owner != null && failedOwners.contains(batch.owner))
                 throw new IllegalStateException("cloudworks.error.storage");
             ownerCount = batch.owner == null ? null : ownerBacklogs.computeIfAbsent(
-                    batch.owner, ignored -> new java.util.concurrent.atomic.AtomicInteger());
+                    batch.owner, ignored -> new AtomicInteger());
             if (ownerCount != null) ownerCount.incrementAndGet();
             pendingSubmissions.incrementAndGet();
         }
         boolean offered = false;
         try {
-            offered = queue.offer(batch, timeoutMillis, java.util.concurrent.TimeUnit.MILLISECONDS);
+            offered = queue.offer(batch, timeoutMillis, TimeUnit.MILLISECONDS);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
         }
@@ -154,7 +171,7 @@ public final class CloudworksPersistenceQueue implements AutoCloseable {
                 throw new IllegalStateException("cloudworks.error.busy");
             }
             if (batch.owner != null)
-                ownerBacklogs.computeIfAbsent(batch.owner, ignored -> new java.util.concurrent.atomic.AtomicInteger())
+                ownerBacklogs.computeIfAbsent(batch.owner, ignored -> new AtomicInteger())
                         .incrementAndGet();
             idle.notifyAll();
         }
@@ -177,7 +194,7 @@ public final class CloudworksPersistenceQueue implements AutoCloseable {
     }
 
     int ownerBacklog(UUID owner) {
-        java.util.concurrent.atomic.AtomicInteger count = owner == null ? null : ownerBacklogs.get(owner);
+        AtomicInteger count = owner == null ? null : ownerBacklogs.get(owner);
         return count == null ? 0 : Math.max(0, count.get());
     }
 
@@ -279,7 +296,7 @@ public final class CloudworksPersistenceQueue implements AutoCloseable {
                     }
                 }
                 Batch batch;
-                java.util.List<Batch> grouped = new java.util.ArrayList<>();
+                List<Batch> grouped = new ArrayList<>();
                 // Poll under applyLock: the inline take-over path uses the same
                 // lock, so FIFO order holds across both appliers.
                 applyLock.lock();
@@ -301,9 +318,9 @@ public final class CloudworksPersistenceQueue implements AutoCloseable {
                                 NBTTagCompound merged = new NBTTagCompound();
                                 merged.setInteger("schema", 2);
                                 merged.setString("owner", batch.owner.toString());
-                                net.minecraft.nbt.NBTTagList operations = new net.minecraft.nbt.NBTTagList();
+                                NBTTagList operations = new NBTTagList();
                                 for (Batch member : grouped) {
-                                    net.minecraft.nbt.NBTTagList entries = member.intent.getTagList("operations", 10);
+                                    NBTTagList entries = member.intent.getTagList("operations", 10);
                                     for (int index = 0; index < entries.tagCount(); index++)
                                         operations.appendTag(entries.getCompoundTagAt(index));
                                 }
@@ -329,7 +346,7 @@ public final class CloudworksPersistenceQueue implements AutoCloseable {
                     synchronized (idle) {
                         activeBatches.addAndGet(-grouped.size());
                         if (batch.owner != null) {
-                            java.util.concurrent.atomic.AtomicInteger count = ownerBacklogs.get(batch.owner);
+                            AtomicInteger count = ownerBacklogs.get(batch.owner);
                             if (count != null) count.addAndGet(-grouped.size());
                         }
                         idle.notifyAll();
@@ -344,7 +361,7 @@ public final class CloudworksPersistenceQueue implements AutoCloseable {
             if (!(fatal instanceof SimulatedCrash)) {
                 try { sink.noteIoFailure(null, fatal); }
                 catch (Throwable reportingFailure) {
-                    System.err.println("Cloudworks IO could not report fatal failure: " + reportingFailure);
+                    Mekanism.logger.error("Cloudworks IO could not report fatal failure", reportingFailure);
                 }
             }
             synchronized (idle) {
@@ -372,16 +389,18 @@ public final class CloudworksPersistenceQueue implements AutoCloseable {
                 }
                 AbortPoint abort = armedAbort;
                 armedAbort = AbortPoint.NONE;
-                if (batch.intent != null) {
-                    sink.writeIntentFile(batch.owner, batch.intent);
+                NBTTagCompound intent = batch.deferredIntent == null ? batch.intent : batch.deferredIntent.get();
+                if (intent != null) {
+                    sink.writeIntentFile(batch.owner, intent);
                     if (abort == AbortPoint.NONE) abort = consumeIfArmed(AbortPoint.AFTER_INTENT);
                     if (abort == AbortPoint.AFTER_INTENT) throw new SimulatedCrash(abort);
-                    sink.applyIntentRelaxed(batch.owner, batch.intent, abort);
+                    sink.applyIntentRelaxed(batch.owner, intent, abort);
                     sink.commitBatch();
                     long elapsedMs = (System.nanoTime() - batchStart) / 1_000_000L;
                     if (elapsedMs > 100)
-                        System.err.println("CLOUDWORKS-IO SLOW intent batch owner=" + batch.owner
-                                + " ms=" + elapsedMs + " lineEntries=" + batch.intent.getTagList("lines", 10).tagCount());
+                        Mekanism.logger.warn(
+                                "Cloudworks IO slow intent batch owner={} ms={} lineEntries={}", batch.owner,
+                                elapsedMs, intent.getTagList("lines", 10).tagCount());
                     return;
                 }
                 sink.writePlainFiles(batch.files);
@@ -439,15 +458,17 @@ public final class CloudworksPersistenceQueue implements AutoCloseable {
         while (!dead) {
             long remaining = deadlineNanos - System.nanoTime();
             if (remaining <= 0) {
-                System.err.println("Cloudworks IO shutdown deadline exceeded; preserving pending durable batches: "
-                        + backlogDepth());
+                Mekanism.logger.warn(
+                        "Cloudworks IO shutdown deadline exceeded; preserving pending durable batches: {}",
+                        backlogDepth());
                 break;
             }
             try {
                 long waitMillis = Math.max(1, Math.min(TimeUnit.SECONDS.toMillis(30),
                         TimeUnit.NANOSECONDS.toMillis(remaining)));
                 if (drain(waitMillis)) break;
-                System.err.println("Cloudworks IO shutdown waiting for " + backlogDepth() + " durable batches");
+                Mekanism.logger.warn("Cloudworks IO shutdown waiting for {} durable batches",
+                        backlogDepth());
             } catch (InterruptedException interruption) {
                 interrupted = true;
             }
@@ -462,7 +483,8 @@ public final class CloudworksPersistenceQueue implements AutoCloseable {
             catch (InterruptedException interruption) { interrupted = true; }
         }
         if (worker.isAlive())
-            System.err.println("Cloudworks IO worker did not stop before shutdown deadline; durable residue was retained");
+            Mekanism.logger.warn(
+                    "Cloudworks IO worker did not stop before shutdown deadline; durable residue was retained");
         synchronized (idle) {
             idle.notifyAll();
         }
@@ -499,24 +521,24 @@ public final class CloudworksPersistenceQueue implements AutoCloseable {
      * A plain ordered file write (runtime overlays, periodic clouds).
      */
     public static final class FileWrite {
-        final java.nio.file.Path path;
+        final Path path;
         final NBTTagCompound tag;
         final Object monitor;
-        final java.util.function.Supplier<NBTTagCompound> snapshot;
+        final Supplier<NBTTagCompound> snapshot;
 
-        FileWrite(java.nio.file.Path path, NBTTagCompound tag) {
+        FileWrite(Path path, NBTTagCompound tag) {
             this.path = path;
             this.tag = tag;
             this.monitor = null;
             this.snapshot = null;
         }
 
-        FileWrite(java.nio.file.Path path, Object monitor,
-                java.util.function.Supplier<NBTTagCompound> snapshot) {
+        FileWrite(Path path, Object monitor,
+                Supplier<NBTTagCompound> snapshot) {
             this.path = path;
             this.tag = null;
-            this.monitor = java.util.Objects.requireNonNull(monitor);
-            this.snapshot = java.util.Objects.requireNonNull(snapshot);
+            this.monitor = Objects.requireNonNull(monitor);
+            this.snapshot = Objects.requireNonNull(snapshot);
         }
     }
 
@@ -532,12 +554,21 @@ public final class CloudworksPersistenceQueue implements AutoCloseable {
     private static final class Batch {
         final UUID owner;
         final NBTTagCompound intent;          // null for plain file batches
+        final Supplier<NBTTagCompound> deferredIntent;
         final List<FileWrite> files;
 
         Batch(UUID owner, NBTTagCompound intent, List<FileWrite> files) {
             this.owner = owner;
             this.intent = intent;
+            deferredIntent = null;
             this.files = files;
+        }
+
+        Batch(UUID owner, Supplier<NBTTagCompound> deferredIntent) {
+            this.owner = owner;
+            this.intent = null;
+            this.deferredIntent = deferredIntent;
+            files = Collections.emptyList();
         }
 
         boolean portIntent() { return intent != null && intent.getInteger("schema") == 2; }

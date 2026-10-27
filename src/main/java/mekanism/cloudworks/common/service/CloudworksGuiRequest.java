@@ -12,7 +12,7 @@ public final class CloudworksGuiRequest {
     final CloudworksGuiSource source;
     final int offset, cacheType, resourceOffset, resourceTotal, window;
     final UUID graphLine, resourceContext, session;
-    final boolean warehouses, recycle;
+    final boolean warehouses, recycle, catalog;
     final List<QIOResourceDescriptor> choices;
     final String status;
     public final long sequence;
@@ -20,8 +20,9 @@ public final class CloudworksGuiRequest {
     public CloudworksGuiRequest(CloudworksGuiSource source, int offset, UUID graphLine, int cacheType,
             boolean warehouses, boolean recycle, List<QIOResourceDescriptor> choices,
             int resourceOffset, int resourceTotal, UUID resourceContext,
-            int window, UUID session, long sequence, String status) {
+            int window, UUID session, long sequence, String status, boolean catalog) {
         this.source = source;
+        this.catalog = catalog;
         this.offset = offset;
         this.graphLine = graphLine;
         this.cacheType = cacheType;
@@ -39,7 +40,7 @@ public final class CloudworksGuiRequest {
 
     public boolean sameView(CloudworksGuiRequest other) {
         return other != null && offset == other.offset && cacheType == other.cacheType
-                && warehouses == other.warehouses && recycle == other.recycle
+                && warehouses == other.warehouses && recycle == other.recycle && catalog == other.catalog
                 && resourceOffset == other.resourceOffset && resourceTotal == other.resourceTotal
                 && Objects.equals(graphLine, other.graphLine) && Objects.equals(resourceContext, other.resourceContext)
                 && choices.equals(other.choices);

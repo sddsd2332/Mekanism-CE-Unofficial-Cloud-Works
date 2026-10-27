@@ -3,7 +3,7 @@ package mekanism.cloudworks.common.service;
 import mekanism.api.qio.resource.QIOResourceDescriptor;
 import mekanism.cloudworks.common.data.CloudworksResourceStack;
 import mekanism.cloudworks.common.data.MachineNodeData;
-import mekanism.cloudworks.common.slot.MachineSlotLayout;
+import mekanism.cloudworks.api.machine.MachineSlotLayout;
 import net.minecraft.util.ResourceLocation;
 
 import java.util.HashMap;

@@ -4,7 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 import mekanism.api.qio.resource.QIOResourceCodecs;
 import mekanism.api.qio.resource.QIOResourceDescriptor;
-import mekanism.cloudworks.api.CloudworksGenerationContext;
+import mekanism.cloudworks.api.environment.CloudworksGenerationContext;
 import mekanism.cloudworks.common.recipe.CloudworksHeatGeneratorAdapter;
 import mekanism.cloudworks.common.service.CloudworksResourceSymbols;
 import mekanism.common.config.MekanismConfig;
@@ -12,6 +12,7 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.tileentity.TileEntityFurnace;
 import net.minecraftforge.fluids.FluidRegistry;
 import net.minecraftforge.fluids.FluidStack;
+import mekanism.common.config.GeneratorsConfig;
 
 /** Immutable item-to-lava equivalents; all native item hooks are evaluated during compilation. */
 final class CloudworksRuntimeHeatFuel {
@@ -28,7 +29,7 @@ final class CloudworksRuntimeHeatFuel {
 
     static CloudworksRuntimeHeatFuel freeze(CloudworksResourceSymbols symbols, CloudworksGenerationContext context) {
         int lava = symbols.id(QIOResourceCodecs.fluid(new FluidStack(FluidRegistry.LAVA, 1)));
-        mekanism.common.config.GeneratorsConfig generators = MekanismConfig.current().generators;
+        GeneratorsConfig generators = MekanismConfig.current().generators;
         int capacity = generators == null ? 10000 : Math.max(1, generators.heatTankCapacity.val());
         int rate = generators == null ? 1 : Math.max(1, Math.min(capacity, generators.heatGenerationFluidRate.val()));
         double delta = generators == null ? 0 : Math.max(0, CloudworksHeatGeneratorAdapter.output(context, true)

@@ -1,0 +1,6 @@
+{
+  "parent": "cloudworks:item/standard_item",
+  "textures": {
+    "layer0": "cloudworks:items/cloud_weather_card"
+  }
+}

@@ -1,6 +1,8 @@
 package mekanism.cloudworks.common.network;
 
 import io.netty.buffer.ByteBuf;
+import mekanism.cloudworks.common.data.CloudworksData;
+import mekanism.cloudworks.common.data.CloudworksFlowGate;
 import mekanism.cloudworks.common.inventory.ContainerCloudworks;
 import mekanism.cloudworks.common.service.CloudworksPlayerDataManager;
 import mekanism.cloudworks.common.util.CloudworksMessages;
@@ -16,7 +18,21 @@ import net.minecraftforge.fml.common.network.simpleimpl.SimpleNetworkWrapper;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 
+import java.util.Map;
 import java.util.UUID;
+import mekanism.cloudworks.api.transfer.CloudworksUploadResult;
+import mekanism.cloudworks.api.transfer.ICloudworksUploadSource;
+import mekanism.cloudworks.client.toast.CloudworksNoticeToast;
+import mekanism.cloudworks.common.config.CloudworksConfig;
+import mekanism.cloudworks.common.service.CloudworksEditorActions;
+import mekanism.cloudworks.common.service.CloudworksPlayerInventorySource;
+import mekanism.cloudworks.common.service.CloudworksServerTickService;
+import mekanism.cloudworks.common.service.CloudworksStructuralCommand;
+import mekanism.cloudworks.common.team.CloudworksTeamActions;
+import mekanism.cloudworks.common.team.CloudworksTeamContext;
+import net.minecraft.client.Minecraft;
+import net.minecraft.item.ItemStack;
+import net.minecraftforge.fml.common.FMLCommonHandler;
 
 public final class CloudworksNetwork {
     public static final SimpleNetworkWrapper CHANNEL = NetworkRegistry.INSTANCE.newSimpleChannel("CLOUDWORKS");
@@ -36,6 +52,10 @@ public final class CloudworksNetwork {
         CHANNEL.registerMessage(PacketCloudworksPortQIO.StateHandler.class, PacketCloudworksPortQIO.State.class, 6, Side.CLIENT);
         CHANNEL.registerMessage(PacketCloudworksBlueprint.Handler.class, PacketCloudworksBlueprint.Request.class, 7, Side.SERVER);
         CHANNEL.registerMessage(PacketCloudworksBlueprint.ResponseHandler.class, PacketCloudworksBlueprint.Response.class, 8, Side.CLIENT);
+        CHANNEL.registerMessage(PacketCloudworksTeamRecovery.Handler.class, PacketCloudworksTeamRecovery.Request.class, 9, Side.SERVER);
+        CHANNEL.registerMessage(PacketCloudworksTeamRecovery.StateHandler.class, PacketCloudworksTeamRecovery.State.class, 10, Side.CLIENT);
+        CHANNEL.registerMessage(PacketCloudTeamJoin.Handler.class, PacketCloudTeamJoin.Request.class, 11, Side.SERVER);
+        CHANNEL.registerMessage(PacketCloudTeamJoin.StateHandler.class, PacketCloudTeamJoin.State.class, 12, Side.CLIENT);
         initialized = true;
     }
 
@@ -44,6 +64,11 @@ public final class CloudworksNetwork {
      */
     public static void sendNotice(EntityPlayerMP player, int kind) {
         CHANNEL.sendTo(new Notice(kind), player);
+    }
+
+    public static void sendNotice(EntityPlayerMP player, int kind, UUID leader,
+            String leaderName, String teamName) {
+        CHANNEL.sendTo(new Notice(kind, leader, leaderName, teamName), player);
     }
 
     private static UUID readUuid(ByteBuf buf) {
@@ -57,7 +82,7 @@ public final class CloudworksNetwork {
      */
     public static void hopToMainThread(Runnable task) {
         try {
-            net.minecraftforge.fml.common.FMLCommonHandler.instance()
+            FMLCommonHandler.instance()
                     .getMinecraftServerInstance().addScheduledTask(task);
         } catch (RuntimeException | NoClassDefFoundError noServer) {
             task.run();   // bare environment without a launched server: run inline
@@ -74,9 +99,12 @@ public final class CloudworksNetwork {
         VIEW_LINE, MOVE_NODE, TOGGLE_NODE,
         RESOURCE_CHOICES, UPDATE_LINK, UPLOAD_ENERGY, INSTALL_UPGRADE, REMOVE_SPEED, REMOVE_ENERGY, ADD_INVENTORY, RETURN_CACHE, MERGE_MACHINE,
         FILTER_LINK_CHOICE, FILTER_LINK_HELD, FILTER_LINK_CLEAR, CLEAR_NODE_CACHE,
-        CACHE_VIEW, WAREHOUSES_VIEW,
+        CACHE_VIEW, WAREHOUSES_VIEW, CATALOG_VIEW,
         RECYCLE_VIEW, RECYCLE_ROUTE, RECYCLE_CLEAR, ENERGY_FLOW, ENERGY_UPLOAD_CONFIRM,
-        MACHINE_UPLOAD, MACHINE_DOWNLOAD, UPGRADE_UPLOAD_CONFIRM, UPGRADE_DOWNLOAD, LINE_FLOW, LINE_OFFLINE
+         MACHINE_UPLOAD, MACHINE_DOWNLOAD, UPGRADE_UPLOAD_CONFIRM, UPGRADE_DOWNLOAD, LINE_FLOW, LINE_OFFLINE,
+         LINE_BUFFER_CAPACITY, TEAM_ACCESS, TEAM_CREATE, TEAM_JOIN, TEAM_REMOVE,
+         TEAM_LEAVE, TEAM_RENAME, TEAM_OWNER, TEAM_DISSOLVE,
+         TEAM_REQUEST_JOIN, TEAM_APPROVE_JOIN, TEAM_DENY_JOIN, TEAM_SET_MODE, TEAM_SET_COLOR, TEAM_IMPORT
     }
 
     /**
@@ -84,7 +112,10 @@ public final class CloudworksNetwork {
      */
     public static final class Notice implements IMessage {
         public static final int RECYCLE_OVERFLOW = 0;
+        public static final int TEAM_DISSOLVED = 1;
         private int kind;
+        private UUID leader;
+        private String leaderName = "", teamName = "";
 
         public Notice() {
         }
@@ -93,27 +124,48 @@ public final class CloudworksNetwork {
             this.kind = kind;
         }
 
+        public Notice(int kind, UUID leader, String leaderName, String teamName) {
+            this.kind = kind;
+            this.leader = leader;
+            this.leaderName = leaderName == null ? "" : leaderName;
+            this.teamName = teamName == null ? "" : teamName;
+        }
+
         @Override
         public void fromBytes(ByteBuf buf) {
             kind = buf.readByte();
+            if (buf.readBoolean()) {
+                leader = readUuid(buf);
+                PacketBuffer data = new PacketBuffer(buf);
+                leaderName = data.readString(64);
+                teamName = data.readString(64);
+            }
         }
 
         @Override
         public void toBytes(ByteBuf buf) {
             buf.writeByte(kind);
+            buf.writeBoolean(leader != null);
+            if (leader != null) {
+                writeUuid(buf, leader);
+                PacketBuffer data = new PacketBuffer(buf);
+                data.writeString(leaderName);
+                data.writeString(teamName);
+            }
         }
 
         public static final class Handler implements IMessageHandler<Notice, IMessage> {
             @SideOnly(Side.CLIENT)
-            private static void showToast(int kind) {
-                net.minecraft.client.Minecraft.getMinecraft().addScheduledTask(() ->
-                        net.minecraft.client.Minecraft.getMinecraft().getToastGui().add(
-                                new mekanism.cloudworks.client.toast.CloudworksNoticeToast(kind)));
+            private static void showToast(int kind, UUID leader, String leaderName, String teamName) {
+                Minecraft.getMinecraft().addScheduledTask(() ->
+                        Minecraft.getMinecraft().getToastGui().add(
+                                new CloudworksNoticeToast(
+                                        kind, leader, leaderName, teamName)));
             }
 
             @Override
             public IMessage onMessage(Notice message, MessageContext ctx) {
-                showToast(message.kind);
+                showToast(message.kind, message.leader, message.leaderName, message.teamName);
                 return null;
             }
         }
@@ -212,15 +264,29 @@ public final class CloudworksNetwork {
                             || !container.accepts(player, message.window, message.session, message.sequence)) return;
                     CloudworksPlayerDataManager manager = CloudworksPlayerDataManager.INSTANCE;
                     UUID cloudOwner = container.ownerId();
+                    UUID actor = player.getUniqueID();
+                    if (!CloudworksConfig.settings().terminalItemUploadsEnabled
+                            && (message.operation == Operation.ADD_NODE || message.operation == Operation.ADD_INVENTORY
+                            || message.operation == Operation.MERGE_MACHINE || message.operation == Operation.MACHINE_UPLOAD
+                            || message.operation == Operation.ENERGY_UPLOAD_CONFIRM || message.operation == Operation.UPGRADE_UPLOAD_CONFIRM
+                            || message.operation == Operation.UPLOAD_ENERGY)) {
+                        container.sendData("cloudworks.error.terminal_uploads_disabled");
+                        return;
+                    }
+                    if (CloudworksTeamActions.isTeamAction(message.operation)) {
+                        CloudworksTeamActions.handle(
+                                player, container, message.operation, message.line, message.name);
+                        return;
+                    }
                     // Structural commands (Runtime §3.3): the server thread only
                     // validates the session and captures main-thread inputs
                     // (held-item descriptor, GUI resource choice); application
                     // runs on the bounded command worker under the manager lock
                     // and the response hops back to this thread.
-                    if (mekanism.cloudworks.common.service.CloudworksStructuralCommand.asynchronous(message.operation)) {
-                        mekanism.cloudworks.common.service.CloudworksStructuralCommand command;
+                    if (CloudworksStructuralCommand.asynchronous(message.operation)) {
+                        CloudworksStructuralCommand command;
                         try {
-                            command = mekanism.cloudworks.common.service.CloudworksStructuralCommand.capture(cloudOwner,
+                            command = CloudworksStructuralCommand.capture(cloudOwner,
                                     message.operation, message.line, message.node, message.name, message.revision,
                                     (lineId, nodeId) -> container.resourceChoice(lineId, nodeId,
                                             Integer.parseInt(message.name)),
@@ -233,8 +299,11 @@ public final class CloudworksNetwork {
                             container.sendData("cloudworks.error.editor");
                             return;
                         }
-                        boolean queued = mekanism.cloudworks.common.service.CloudworksServerTickService.INSTANCE
+                        boolean queued = CloudworksServerTickService.INSTANCE
                                 .submitStructuralCommand(cloudOwner, () -> {
+                            if (container.isTeamTerminal()
+                                    && !CloudworksTeamContext.canAccess(
+                                            actor, cloudOwner)) return;
                             String status = command.apply(CloudworksPlayerDataManager.INSTANCE);
                             hopToMainThread(() -> {
                                 if (player.openContainer != container || !container.canInteractWith(player)) return;
@@ -255,6 +324,7 @@ public final class CloudworksNetwork {
                                 && message.operation != Operation.RESOURCE_CHOICES
                                 && message.operation != Operation.CACHE_VIEW
                                 && message.operation != Operation.WAREHOUSES_VIEW
+                                && message.operation != Operation.CATALOG_VIEW
                                 && message.operation != Operation.RECYCLE_VIEW
                                 && message.operation != Operation.MACHINE_UPLOAD
                                 && message.operation != Operation.MACHINE_DOWNLOAD
@@ -279,16 +349,15 @@ public final class CloudworksNetwork {
                                 case ADD_NODE -> {
                                     if (message.line == null || player.getHeldItemMainhand().isEmpty()) applied = false;
                                     else {
-                                        net.minecraft.item.ItemStack held = player.getHeldItemMainhand();
-                                        mekanism.cloudworks.api.ICloudworksUploadSource source =
-                                                new mekanism.cloudworks.common.service.CloudworksPlayerInventorySource(
+                                        ItemStack held = player.getHeldItemMainhand();
+                                        ICloudworksUploadSource source =
+                                                new CloudworksPlayerInventorySource(
                                                 player.inventory.mainInventory, player.getUniqueID(), cloudOwner, () -> {
                                             player.inventory.markDirty();
                                             player.inventoryContainer.detectAndSendChanges();
                                         });
-                                        mekanism.cloudworks.api.CloudworksUploadResult uploaded =
-                                                manager.uploadMachines(source, message.line, held, held.getCount(), 0, 0,
-                                                        player.world.provider.getDimension());
+                                        CloudworksUploadResult uploaded =
+                                                manager.uploadMachines(source, message.line, held, held.getCount(), 0, 0);
                                         applied = uploaded.success();
                                     }
                                 }
@@ -312,9 +381,10 @@ public final class CloudworksNetwork {
                                     // 终端插槽·升级下载: value = "speed|energy,shift" —
                                     // materializes pool counts into the host's upgrade-output slot
                                     String[] parts = message.name.split(",", -1);
-                                    container.downloadUpgrade("speed".equals(parts[0]), "1".equals(parts[1]));
+                                    container.downloadUpgrade(parts[0], "1".equals(parts[1]));
                                 }
                                 case WAREHOUSES_VIEW -> container.setWarehousesView("1".equals(message.name));
+                                case CATALOG_VIEW -> container.setCatalogView("1".equals(message.name));
                                 case RECYCLE_VIEW -> container.setRecycleView("1".equals(message.name));
                                 case RECYCLE_ROUTE -> {
                                     // 手动路由: "transfer" → 中转仓, "sending" → 发货仓
@@ -324,21 +394,21 @@ public final class CloudworksNetwork {
                                 }
                                 case RECYCLE_CLEAR -> manager.clearRecycleBin(cloudOwner);
                                 case ENERGY_FLOW -> {
-                                    // owner 级两门开关: value 形如 "r2c=1" / "c2s=0"，可分号并联；未提及的门保持原值
-                                    boolean r2c = manager.getOrCreate(cloudOwner).energyFlowReceivingToCloud();
-                                    boolean c2s = manager.getOrCreate(cloudOwner).energyFlowCloudToSending();
-                                    for (String segment : message.name.split(";")) {
-                                        String[] pair = segment.split("=", 2);
-                                        if (pair.length == 2 && "r2c".equals(pair[0])) r2c = "1".equals(pair[1]);
-                                        if (pair.length == 2 && "c2s".equals(pair[0])) c2s = "1".equals(pair[1]);
-                                    }
-                                    manager.setEnergyFlows(cloudOwner, r2c,
-                                          manager.getOrCreate(cloudOwner).energyFlowReceivingToLines(), c2s,
-                                          manager.getOrCreate(cloudOwner).energyFlowLinesToSending());
+                                    // 统一闸门线协议(8.4): value 形如 "r2c=1" / "c2s=0"，可分号并联；
+                                    // 未提及的门保持原值，未声明为协议可编辑的云侧门(如 r2l/l2s)被忽略。
+                                    // 校验路径不变: manager.setEnergyFlows 仍走 requireEnabled + 回滚持久化。
+                                    CloudworksData cloud = manager.getOrCreate(cloudOwner);
+                                    Map<CloudworksFlowGate, Boolean> edits = CloudworksFlowGate.parseWire(
+                                            CloudworksFlowGate.Scope.CLOUD, message.name);
+                                    manager.setEnergyFlows(cloudOwner,
+                                            edits.getOrDefault(CloudworksFlowGate.RECEIVING_TO_CLOUD, cloud.energyFlowReceivingToCloud()),
+                                            cloud.energyFlowReceivingToLines(),
+                                            edits.getOrDefault(CloudworksFlowGate.CLOUD_TO_SENDING, cloud.energyFlowCloudToSending()),
+                                            cloud.energyFlowLinesToSending());
                                 }
                                 case ENERGY_UPLOAD_CONFIRM -> container.uploadEnergy();
                                 case UPGRADE_UPLOAD_CONFIRM -> container.uploadUpgrade();
-                                default -> applied = mekanism.cloudworks.common.service.CloudworksEditorActions.apply(
+                                default -> applied = CloudworksEditorActions.apply(
                                         container, player, message.operation, message.line, message.node, message.name);
                             }
                             if (!applied) status = "cloudworks.error.not_found";

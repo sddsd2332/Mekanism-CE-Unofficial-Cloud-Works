@@ -5,12 +5,18 @@ import mekanism.cloudworks.common.blueprint.CloudworksPendingBlueprint;
 import mekanism.cloudworks.common.network.CloudworksLineDraftCodec;
 import mekanism.cloudworks.common.network.data.CloudworksLineDraft;
 
-import mekanism.cloudworks.api.CloudworksUploadReservation;
-import mekanism.cloudworks.api.CloudworksUploadResult;
-import mekanism.cloudworks.api.ICloudworksUploadSource;
+import mekanism.cloudworks.api.transfer.CloudworksUploadReservation;
+import mekanism.cloudworks.api.transfer.CloudworksUploadResult;
+import mekanism.cloudworks.api.module.MachineModuleType;
+import mekanism.cloudworks.api.transfer.ICloudworksUploadSource;
 import mekanism.cloudworks.common.data.*;
 import mekanism.cloudworks.common.registry.CloudworksRegistries;
+import mekanism.cloudworks.common.upgrade.CloudworksMachineModuleRegistry;
+import mekanism.cloudworks.common.special.CloudworksSpecialNodeArchetypes;
+import mekanism.cloudworks.common.special.CloudworksSpecialNodeStore;
+import mekanism.cloudworks.common.special.CloudworksInfiniteResourceCardData;
 import mekanism.api.qio.resource.QIOResourceDescriptor;
+import mekanism.api.qio.resource.QIOResourceCodecs;
 import mekanism.api.energy.IStrictEnergyHandler;
 import mekanism.common.integration.energy.EnergyCompatUtils;
 import mekanism.common.item.ItemBlockEnergyCube;
@@ -20,16 +26,70 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.CompressedStreamTools;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.nbt.NBTTagList;
+import net.minecraft.util.ResourceLocation;
 
 import javax.annotation.Nullable;
 import java.io.File;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.*;
-import mekanism.cloudworks.api.CloudworksGenerationContext;
+
+import mekanism.cloudworks.api.environment.CloudworksGenerationContext;
+import java.nio.channels.FileChannel;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.DirectoryIteratorException;
+import java.nio.file.StandardOpenOption;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
+import java.util.function.DoubleConsumer;
+import java.util.function.Predicate;
+import java.util.stream.Stream;
+import mekanism.api.inventory.IInventorySlot;
+import mekanism.cloudworks.api.CloudworksAPI;
+import mekanism.cloudworks.api.transfer.CloudworksDepositRequest;
+import mekanism.cloudworks.api.CloudworksEvent;
+import mekanism.cloudworks.api.machine.CloudworksThermalPlan;
+import mekanism.cloudworks.api.transfer.CloudworksTransferRequest;
+import mekanism.cloudworks.api.transfer.CloudworksTransferResult;
+import mekanism.cloudworks.api.module.CloudworksUpgradeItems;
+import mekanism.cloudworks.common.card.CloudworksCardEffect;
+import mekanism.cloudworks.common.card.CloudworksCardEffects;
+import mekanism.cloudworks.common.config.CloudworksConfig;
+import mekanism.cloudworks.common.content.CloudworksHybridTank;
+import mekanism.cloudworks.common.content.CloudworksPortBinding;
+import mekanism.cloudworks.common.content.CloudworksPortIo;
+import mekanism.cloudworks.common.content.CloudworksTerminalHost;
+import mekanism.cloudworks.common.content.CloudworksTerminalSlots;
+import mekanism.cloudworks.common.registries.CloudworksItems;
+import mekanism.cloudworks.common.registry.CloudworksAuxiliaryNodeRegistry;
+import mekanism.cloudworks.common.registry.CloudworksNodeMechanisms;
+import mekanism.cloudworks.common.registry.MachineKey;
+import mekanism.cloudworks.common.runtime.CloudworksExternalEvent;
+import mekanism.cloudworks.common.runtime.CloudworksRuntimeCheckpoint;
+import mekanism.cloudworks.common.runtime.CloudworksRuntimeIngressJournal;
+import mekanism.cloudworks.common.special.CloudworksSpecialNodeArchetype;
+import mekanism.cloudworks.common.team.CloudworksTeamContext;
+import mekanism.cloudworks.common.team.CloudworksTeamManager;
+import mekanism.cloudworks.common.tile.prefab.TileEntityCloudworksPort;
+import mekanism.cloudworks.common.tile.TileEntityCloudDashboard;
+import mekanism.cloudworks.common.upgrade.CloudworksUpgradeEffects;
+import mekanism.cloudworks.common.upgrade.CloudworksUpgradeLimits;
+import mekanism.common.Mekanism;
+import mekanism.common.Upgrade;
+import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.nbt.NBTBase;
+import net.minecraft.nbt.NBTTagString;
 
 /**
  * World-scoped records. Unreadable records are never replaced with empty data.
@@ -37,12 +97,6 @@ import mekanism.cloudworks.api.CloudworksGenerationContext;
 public final class CloudworksPlayerDataManager {
     public static final CloudworksPlayerDataManager INSTANCE = new CloudworksPlayerDataManager();
     public static final int PAGE_SIZE = 32;
-    /**
-     * Legacy batch bound retained for wire/test compatibility. Virtual execution
-     * now captures the complete active line set of one owner in one transaction.
-     */
-    @Deprecated
-    public static final int TRANSFER_LINES_PER_COMMIT = Integer.MAX_VALUE;
     /**
      * Base default capacity; the configuration supplies the actual new-player defaults.
      * Initial stored energy is zero. Persisted records keep their own values.
@@ -56,33 +110,37 @@ public final class CloudworksPlayerDataManager {
     /**
      * Diagnostic counters for the IO sink; tests only.
      */
-    public static final java.util.concurrent.atomic.AtomicLong DEBUG_LINE_READS
-            = new java.util.concurrent.atomic.AtomicLong();
-    public static final java.util.concurrent.atomic.AtomicLong DEBUG_INTENT_APPLIES
-            = new java.util.concurrent.atomic.AtomicLong();
-    public static final java.util.concurrent.atomic.AtomicLong DEBUG_FILE_WRITES =
-            new java.util.concurrent.atomic.AtomicLong();
-    public static final java.util.concurrent.atomic.AtomicLong DEBUG_BYTES_WRITTEN =
-            new java.util.concurrent.atomic.AtomicLong();
-    public static final java.util.concurrent.atomic.AtomicLong DEBUG_FILE_READS =
-            new java.util.concurrent.atomic.AtomicLong();
-    public static final java.util.concurrent.atomic.AtomicLong DEBUG_PROJECTION_BUILDS =
-            new java.util.concurrent.atomic.AtomicLong();
-    public static final java.util.concurrent.atomic.AtomicLong DEBUG_PROJECTION_HASHES =
-            new java.util.concurrent.atomic.AtomicLong();
+    public static final AtomicLong DEBUG_LINE_READS
+            = new AtomicLong();
+    public static final AtomicLong DEBUG_INTENT_APPLIES
+            = new AtomicLong();
+    public static final AtomicLong DEBUG_FILE_WRITES =
+            new AtomicLong();
+    public static final AtomicLong DEBUG_BYTES_WRITTEN =
+            new AtomicLong();
+    public static final AtomicLong DEBUG_FILE_READS =
+            new AtomicLong();
+    public static final AtomicLong DEBUG_CACHED_FILE_READS = new AtomicLong();
+    public static final AtomicLong DEBUG_CACHE_VERIFICATION_READS = new AtomicLong();
+    public static final AtomicLong DEBUG_RUNTIME_LINE_DECODES = new AtomicLong();
+    public static final AtomicLong DEBUG_PROJECTION_BUILDS =
+            new AtomicLong();
+    public static final AtomicLong DEBUG_PROJECTION_HASHES =
+            new AtomicLong();
     private final CloudworksPlayerDataManager parent;
-    private final Map<UUID, CloudworksPlayerDataManager> domains = new java.util.concurrent.ConcurrentHashMap<>();
-    private final Map<UUID, CloudworksPlayerDataManager> lineDomains = new java.util.concurrent.ConcurrentHashMap<>();
-    private final Map<UUID, CloudworksPlayerDataManager> terminalDomains = new java.util.concurrent.ConcurrentHashMap<>();
-    private final Map<UUID, UUID> terminalOwners = new java.util.concurrent.ConcurrentHashMap<>();
-    private final Map<UUID, CloudworksData> cloudViews = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Map<UUID, CloudworksPlayerDataManager> domains = new ConcurrentHashMap<>();
+    private final Map<UUID, CloudworksPlayerDataManager> lineDomains = new ConcurrentHashMap<>();
+    private final Map<UUID, CloudworksPlayerDataManager> terminalDomains = new ConcurrentHashMap<>();
+    private final Map<UUID, UUID> terminalOwners = new ConcurrentHashMap<>();
+    private final Map<UUID, CloudworksData> cloudViews = new ConcurrentHashMap<>();
     private volatile boolean closing;
     private final Map<UUID, TerminalSession> terminalSessions = new HashMap<>();
     private final Map<UUID, CloudworksLineEditSession> activeEdits = new HashMap<>();
     private final Map<UUID, CloudworksPendingBlueprint> pendingBlueprints = new HashMap<>();
     private volatile int globalSimulatedTick;
     private final Map<UUID, CloudworksData> clouds = new LinkedHashMap<UUID, CloudworksData>() {
-        @Override public CloudworksData put(UUID owner, CloudworksData cloud) {
+        @Override
+        public CloudworksData put(UUID owner, CloudworksData cloud) {
             if (parent != null) parent.cloudViews.put(owner, cloud);
             return super.put(owner, cloud);
         }
@@ -90,8 +148,10 @@ public final class CloudworksPlayerDataManager {
     private final Map<UUID, NBTTagCompound> guiLines = new HashMap<>(),
             guiMachines = new HashMap<>(), guiRecycle = new HashMap<>();
     private final Set<UUID> runtimeUnmaterialized = new HashSet<>();
+    private final Map<UUID, mekanism.cloudworks.common.runtime.CloudworksRuntimeLineSnapshot> runtimeLineSnapshots = new HashMap<>();
     private final Map<UUID, ProductionLineData> lines = new LinkedHashMap<UUID, ProductionLineData>() {
-        @Override public ProductionLineData put(UUID id, ProductionLineData line) {
+        @Override
+        public ProductionLineData put(UUID id, ProductionLineData line) {
             if (parent != null) parent.lineDomains.put(id, CloudworksPlayerDataManager.this);
             return super.put(id, line);
         }
@@ -99,26 +159,29 @@ public final class CloudworksPlayerDataManager {
     /**
      * Owner-level machine caches; the single physical home of every machine.
      */
-    private final Map<UUID, mekanism.cloudworks.common.data.CloudworksMachineCache> machineCaches = new LinkedHashMap<>();
+    private final Map<UUID, CloudworksMachineCache> machineCaches = new LinkedHashMap<>();
+    private final Map<UUID, CloudworksSpecialNodeStore> specialNodeStores = new LinkedHashMap<>();
     /**
      * Owner-level recycle bins; receiver for deleted node/line resources.
      */
-    private final Map<UUID, mekanism.cloudworks.common.data.CloudworksRecycleBin> recycleBins = new LinkedHashMap<>();
+    private final Map<UUID, CloudworksRecycleBin> recycleBins = new LinkedHashMap<>();
     /**
      * Owners with recycle overflow events waiting for a chat+toast notice on the main thread.
      */
-    private java.util.Set<UUID> pendingRecycleOverflow = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private Set<UUID> pendingRecycleOverflow = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Long> revisions = new HashMap<>();
     private final Map<UUID, Long> commandRevisions = new HashMap<>();
     private final Map<UUID, Set<UUID>> runtimeDirtyLines = new LinkedHashMap<>();
     private final Map<UUID, CloudworksWarehouseDelta> runtimeWarehouseDeltas = new LinkedHashMap<>();
     private final Map<UUID, CloudworksData> durableCloudBaselines = new HashMap<>();
-    private final Map<UUID, mekanism.cloudworks.common.runtime.CloudworksRuntimeIngressJournal> runtimeIngress =
+    private final Map<UUID, CloudworksRuntimeIngressJournal> runtimeIngress =
             new HashMap<>();
     private final Map<UUID, Long> checkpointGenerations = new HashMap<>();
-    /** Transfer ids whose intent was fully applied by the IO worker this session. */
-    private final java.util.Set<UUID> durableUploadTransfers =
-            java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /**
+     * Transfer ids whose intent was fully applied by the IO worker this session.
+     */
+    private final Set<UUID> durableUploadTransfers =
+            ConcurrentHashMap.newKeySet();
     private final Map<UUID, CloudworksResourceSymbols> symbolTables = new HashMap<>();
     private final Map<UUID, Map<String, Integer>> resourceIdCaches = new HashMap<>();
     private final Map<UUID, Long> sessionGenerations = new HashMap<>();
@@ -144,27 +207,45 @@ public final class CloudworksPlayerDataManager {
      * the next login and for audit — never silently dropped. Lock-free map:
      * appended on the IO thread without the manager lock.
      */
-    private java.util.concurrent.ConcurrentMap<UUID, List<NBTTagCompound>> sourceDebts =
-            new java.util.concurrent.ConcurrentHashMap<>();
+    private ConcurrentMap<UUID, List<NBTTagCompound>> sourceDebts =
+            new ConcurrentHashMap<>();
     private final Map<UUID, List<NBTTagCompound>> pendingSourceDebtWrites = new LinkedHashMap<>();
     /**
      * Owners whose durable batches failed; their operations refuse until reload (isolation). Lock-free set: the IO thread writes without the manager lock.
      */
-    private java.util.Set<UUID> failedOwners = java.util.concurrent.ConcurrentHashMap.newKeySet();
-    private java.util.concurrent.ConcurrentMap<UUID, Throwable> ownerFailureCauses = new java.util.concurrent.ConcurrentHashMap<>();
+    private Set<UUID> failedOwners = ConcurrentHashMap.newKeySet();
+    private ConcurrentMap<UUID, Throwable> ownerFailureCauses = new ConcurrentHashMap<>();
     /**
      * IO-thread steps of the durable pipeline; no manager lock is taken here.
      */
+    private final CloudworksPersistenceViews persistenceViews = new CloudworksPersistenceViews(128, 16L * 1024 * 1024);
     private final CloudworksPersistenceQueue.Sink ioSink = new CloudworksPersistenceQueue.Sink() {
-        @Override public void beginBatch() { IO_READS.set(new IoReads()); }
-        @Override public void commitBatch() {
+        @Override
+        public void beginBatch() {
+            IO_READS.set(new IoReads(persistenceViews));
+        }
+
+        @Override
+        public void commitBatch() {
             forcePendingProjections();
             IoReads cache = IO_READS.get();
             if (cache == null) return;
             for (Runnable acknowledgement : cache.acknowledgements) acknowledgement.run();
             cache.acknowledgements.clear();
+            if (!cache.diskOnly)
+                for (Map.Entry<Path, NBTTagCompound> entry : cache.tags.entrySet())
+                    cache.shared.put(entry.getKey(), entry.getValue(), cache.fingerprints.get(entry.getKey()),
+                            cache.fileDigests.get(entry.getKey()));
+            cache.committed = true;
         }
-        @Override public void endBatch() { IO_READS.remove(); }
+
+        @Override
+        public void endBatch() {
+            IoReads cache = IO_READS.get();
+            if (cache != null && !cache.committed) cache.shared.clear();
+            IO_READS.remove();
+        }
+
         @Override
         public void writeIntentFile(UUID owner, NBTTagCompound intent) {
             if (parent == null) {
@@ -181,8 +262,7 @@ public final class CloudworksPlayerDataManager {
                 portJournal.append(owner, intent);
                 intent.setBoolean("portJournalDurable", true);
                 return;
-            }
-            else {
+            } else {
                 portJournal.compact(owner);
                 prepareProjectionFingerprints(owner, intent);
                 packProjectionPatches(owner, intent);
@@ -209,7 +289,8 @@ public final class CloudworksPlayerDataManager {
         @Override
         public void writePlainFiles(List<CloudworksPersistenceQueue.FileWrite> files) {
             for (CloudworksPersistenceQueue.FileWrite fileWrite : files) {
-                if (fileWrite.monitor == null) write(fileWrite.path, preservePortWatermark(fileWrite.path, fileWrite.tag));
+                if (fileWrite.monitor == null)
+                    write(fileWrite.path, preservePortWatermark(fileWrite.path, fileWrite.tag));
                 else synchronized (fileWrite.monitor) {
                     write(fileWrite.path, fileWrite.snapshot.get());
                 }
@@ -243,13 +324,13 @@ public final class CloudworksPlayerDataManager {
      * receiving warehouse has room for that type again. The manager only invokes
      * registered callbacks — it never touches the world itself.
      */
-    private final Map<UUID, Map<mekanism.api.qio.resource.QIOResourceDescriptor, List<Runnable>>> typeUnblockListeners
+    private final Map<UUID, Map<QIOResourceDescriptor, List<Runnable>>> typeUnblockListeners
             = new LinkedHashMap<>();
     /**
      * Debit-recovery shortfalls observed; audit counter, diagnostics only.
      */
-    private java.util.concurrent.atomic.AtomicLong debugDebitRecoveryShortfalls =
-            new java.util.concurrent.atomic.AtomicLong();
+    private AtomicLong debugDebitRecoveryShortfalls =
+            new AtomicLong();
     /**
      * Bounded server-thread drain budget for interactive terminal/source
      * admission. Structural commands run off-thread; physical boundaries may
@@ -259,7 +340,7 @@ public final class CloudworksPlayerDataManager {
     /**
      * Increases whenever the world session changes; old-session results are rejected.
      */
-    private long worldEpoch;
+    private volatile long worldEpoch;
     private volatile Path root;
     private volatile boolean recoveryRequired;
     /**
@@ -272,6 +353,23 @@ public final class CloudworksPlayerDataManager {
     private CloudworksPersistenceQueue persistence;
     private CloudworksPortJournal portJournal;
     private UUID storageId;
+    private Object teamRecoveryLock = new Object();
+    /**
+     * Last applied recovery-machine drain batch per dissolved team (buffer-file mirror).
+     */
+    private final Map<UUID, Long> teamRecoveryBatches = new HashMap<>();
+    /**
+     * Recovery buffers whose contents were found without a trustworthy lastBatch ledger.
+     */
+    private final Set<UUID> recoveryLedgerInvalid;
+    /**
+     * One live recovery buffer per dissolved estate; separate tiles must never load stale copies.
+     */
+    private final Map<UUID, Object> teamRecoveryMounts = new HashMap<>();
+    /**
+     * Team identities known to the current world session; shared by all owner domains.
+     */
+    private final Set<UUID> teamOwnerIds;
     private final Map<UUID, CloudworksPortRecord> ports = new HashMap<>();
     private final Map<UUID, Object> portMounts = new HashMap<>();
     private final Set<UUID> dirtyPorts = new HashSet<>();
@@ -287,6 +385,8 @@ public final class CloudworksPlayerDataManager {
     public CloudworksPlayerDataManager(int ioCapacity) {
         this.ioCapacity = ioCapacity;
         this.parent = null;
+        this.teamOwnerIds = ConcurrentHashMap.newKeySet();
+        this.recoveryLedgerInvalid = ConcurrentHashMap.newKeySet();
     }
 
     private CloudworksPlayerDataManager(CloudworksPlayerDataManager parent) {
@@ -303,6 +403,9 @@ public final class CloudworksPlayerDataManager {
         ownerFailureCauses = parent.ownerFailureCauses;
         pendingRecycleOverflow = parent.pendingRecycleOverflow;
         debugDebitRecoveryShortfalls = parent.debugDebitRecoveryShortfalls;
+        teamRecoveryLock = parent.teamRecoveryLock;
+        teamOwnerIds = parent.teamOwnerIds;
+        recoveryLedgerInvalid = parent.recoveryLedgerInvalid;
     }
 
     private CloudworksPlayerDataManager domain(UUID owner) {
@@ -321,8 +424,21 @@ public final class CloudworksPlayerDataManager {
         return domain;
     }
 
-    /** Lock only this owner; different owners never share a mutable state monitor. */
-    public Object ownerLock(UUID owner) { return domain(owner); }
+    /**
+     * Lock only this owner; different owners never share a mutable state monitor.
+     */
+    public Object ownerLock(UUID owner) {
+        return domain(owner);
+    }
+
+    long worldEpoch() {
+        return parent == null ? worldEpoch : parent.worldEpoch;
+    }
+
+    boolean acceptsApiRequests(long epoch) {
+        CloudworksPlayerDataManager manager = parent == null ? this : parent;
+        return !manager.closing && manager.root != null && manager.worldEpoch == epoch;
+    }
 
     /**
      * A line is deletable whenever it is stopped; deletion releases everything.
@@ -395,11 +511,11 @@ public final class CloudworksPlayerDataManager {
      * Deposits cached resources into the bin and reports the voided (overflow) amount.
      */
     @SafeVarargs
-    private static long recycleIntoBin(mekanism.cloudworks.common.data.CloudworksRecycleBin bin,
-                                       List<mekanism.cloudworks.common.data.CloudworksResourceStack>... inventories) {
+    private static long recycleIntoBin(CloudworksRecycleBin bin,
+                                       List<CloudworksResourceStack>... inventories) {
         long discarded = 0;
-        for (List<mekanism.cloudworks.common.data.CloudworksResourceStack> inventory : inventories)
-            for (mekanism.cloudworks.common.data.CloudworksResourceStack stack : inventory)
+        for (List<CloudworksResourceStack> inventory : inventories)
+            for (CloudworksResourceStack stack : inventory)
                 discarded += bin.deposit(stack.descriptor(), stack.amount());
         return discarded;
     }
@@ -414,7 +530,8 @@ public final class CloudworksPlayerDataManager {
         for (String key : Arrays.asList("generation", "energy", "journals"))
             tag.removeTag(key);
         stripRuntime(tag.getTagList("machines", 10), "active", "progress", "totalTicks",
-                "state", "inputs", "outputs", "templates", "operation");
+                "state", "inputs", "outputs", "templates", "operation", "outputSequence", "thermalState",
+                "executionBranches", "generationRemainders");
         // Channel buffers are runtime state, but their capacity ceiling is structural.
         NBTTagList channels = tag.getTagList("channels", 10);
         for (int i = 0; i < channels.tagCount(); i++) {
@@ -445,7 +562,7 @@ public final class CloudworksPlayerDataManager {
     private static void validateUploadSegments(NBTTagCompound machineCacheTag,
                                                NBTTagCompound transferTag, List<NBTTagCompound> lineTags) {
         if (transferTag == null || lineTags.size() != 1) throw dataError(null);
-        mekanism.cloudworks.common.data.CloudworksMachineCache.read(machineCacheTag.copy());
+        CloudworksMachineCache.read(machineCacheTag.copy());
         if (transferTag.getInteger("schema") != 1 || transferTag.getInteger("count") <= 0)
             throw dataError(null);
         UUID transferId = UUID.fromString(transferTag.getString("transferId"));
@@ -456,6 +573,15 @@ public final class CloudworksPlayerDataManager {
         long machineTotal = transferTag.getLong("machineTotal");
         ProductionLineData line = ProductionLineData.read(lineTags.get(0).copy());
         if (!line.lineId().equals(lineId)) throw dataError(null);
+        if ("auxiliary".equals(transferTag.getString("kind"))) {
+            CloudworksAuxiliaryNodeData claimed = null;
+            for (CloudworksAuxiliaryNodeData node : line.auxiliaries())
+                if (node.nodeId().equals(nodeId)) claimed = node;
+            if (claimed == null || !transferId.equals(claimed.transferId())
+                    || !sourceId.equals(claimed.sourceId()) || machineTotal != 0
+                    || transferTag.getInteger("count") != 1) throw dataError(null);
+            return;
+        }
         MachineNodeData claimed = null;
         for (MachineNodeData node : line.machines()) if (node.nodeId().equals(nodeId)) claimed = node;
         // Merge intents carry the post-merge total; create intents verify count == machineCount.
@@ -474,7 +600,7 @@ public final class CloudworksPlayerDataManager {
     private static void deleteTransferIntent(Path file) {
         forcePendingProjections();
         try {
-            Files.delete(file);
+            Files.deleteIfExists(file);
         } catch (IOException failure) {
             throw dataError(failure);
         }
@@ -485,21 +611,30 @@ public final class CloudworksPlayerDataManager {
     }
 
     private static final ThreadLocal<IoReads> IO_READS = new ThreadLocal<>();
+
     private static final class IoReads {
+        final CloudworksPersistenceViews shared;
+        boolean committed, diskOnly;
         final Map<Path, NBTTagCompound> tags = new HashMap<>();
         final Map<Path, byte[]> fingerprints = new HashMap<>();
+        final Map<Path, byte[]> fileDigests = new HashMap<>();
         final Map<NBTTagCompound, ProjectionPlan> projections = new IdentityHashMap<>();
         final Set<Path> pendingForces = new LinkedHashSet<>();
         final List<Runnable> acknowledgements = new ArrayList<>();
+        IoReads(CloudworksPersistenceViews shared) { this.shared = shared; }
     }
 
     private static final class ProjectionPlan {
         final CloudworksData cloud;
+        final Map<String, Path> paths;
         final Map<String, NBTTagCompound> next = new LinkedHashMap<>();
         final Map<String, byte[]> fingerprints = new HashMap<>();
         NBTTagList lines;
 
-        ProjectionPlan(CloudworksData cloud) { this.cloud = cloud; }
+        ProjectionPlan(CloudworksData cloud, Map<String, Path> paths) {
+            this.cloud = cloud;
+            this.paths = paths;
+        }
     }
 
     private static ProjectionPlan projectionPlan(NBTTagCompound intent) {
@@ -513,14 +648,24 @@ public final class CloudworksPlayerDataManager {
         return result;
     }
 
-    /** Keep the intent/journal until every projection in its batch reaches the durability barrier. */
+    /**
+     * Keep the intent/journal until every projection in its batch reaches the durability barrier.
+     */
     private static void forcePendingProjections() {
         IoReads cache = IO_READS.get();
         if (cache == null) return;
         for (Path file : cache.pendingForces) {
-            try (java.nio.channels.FileChannel channel = java.nio.channels.FileChannel.open(
-                    file, java.nio.file.StandardOpenOption.WRITE)) { channel.force(true); }
-            catch (IOException failure) { throw dataError(failure); }
+            // A later projection in the same transaction may intentionally
+            // remove the file (for example when a recovery source is
+            // retired). Its absence already means there is nothing left to
+            // force at the durability barrier.
+            if (!Files.exists(file)) continue;
+            try (FileChannel channel = FileChannel.open(
+                    file, StandardOpenOption.WRITE)) {
+                channel.force(true);
+            } catch (IOException failure) {
+                throw dataError(failure);
+            }
         }
         cache.pendingForces.clear();
     }
@@ -530,15 +675,33 @@ public final class CloudworksPlayerDataManager {
         return IO_READS.get() == null ? tag : tag.copy();
     }
 
-    /** Internal read-only consumers share a batch snapshot; mutable callers use read(). */
+    /**
+     * Internal read-only consumers share a batch snapshot; mutable callers use read().
+     */
     private static NBTTagCompound readView(Path file) {
         IoReads cache = IO_READS.get();
         if (cache != null && cache.tags.containsKey(file)) return cache.tags.get(file);
-        try {
-            NBTTagCompound tag = CompressedStreamTools.read(file.toFile());
+        if (cache != null && !cache.diskOnly) {
+            CloudworksPersistenceViews.Entry entry = cache.shared.get(file);
+            if (entry != null) {
+                cache.tags.put(file, entry.tag);
+                cache.fileDigests.put(file, entry.fileDigest);
+                if (entry.fingerprint != null) cache.fingerprints.put(file, entry.fingerprint);
+                DEBUG_CACHED_FILE_READS.incrementAndGet();
+                return entry.tag;
+            }
+        }
+        java.security.MessageDigest digest = CloudworksPersistenceViews.newDigest();
+        try (DataInputStream input = new DataInputStream(new BufferedInputStream(
+                new java.security.DigestInputStream(Files.newInputStream(file), digest)))) {
+            NBTTagCompound tag = CompressedStreamTools.read(input);
+            while (input.read() != -1) { /* Include any trailing bytes in the file identity. */ }
             DEBUG_FILE_READS.incrementAndGet();
             if (tag == null) throw dataError(null);
-            if (cache != null) cache.tags.put(file, tag);
+            if (cache != null) {
+                cache.tags.put(file, tag);
+                cache.fileDigests.put(file, digest.digest());
+            }
             return tag;
         } catch (IOException e) {
             throw dataError(e);
@@ -548,7 +711,15 @@ public final class CloudworksPlayerDataManager {
     private static byte[] diskFingerprint(Path file) {
         IoReads cache = IO_READS.get();
         if (cache == null) return CloudworksNbtFingerprint.of(readView(file));
-        return cache.fingerprints.computeIfAbsent(file, ignored -> CloudworksNbtFingerprint.of(readView(file)));
+        byte[] fingerprint = cache.fingerprints.get(file);
+        if (fingerprint != null) return fingerprint;
+        NBTTagCompound view = readView(file);
+        fingerprint = cache.fingerprints.get(file);
+        if (fingerprint == null) {
+            fingerprint = CloudworksNbtFingerprint.of(view);
+            cache.fingerprints.put(file, fingerprint);
+        }
+        return fingerprint;
     }
 
     private static NBTTagCompound preservePortWatermark(Path file, NBTTagCompound next) {
@@ -567,14 +738,22 @@ public final class CloudworksPlayerDataManager {
         try {
             Files.createDirectories(file.getParent());
             temporary = Files.createTempFile(file.getParent(), "cloudworks-", ".tmp");
-            CompressedStreamTools.write(tag, temporary.toFile());
+            // Close the buffered stream before forcing or replacing its file.
+            // These are the vanilla uncompressed NBT overloads.
+            java.security.MessageDigest digest = CloudworksPersistenceViews.newDigest();
+            try (DataOutputStream output = new DataOutputStream(new BufferedOutputStream(
+                    new java.security.DigestOutputStream(Files.newOutputStream(temporary), digest)))) {
+                CompressedStreamTools.write(tag, output);
+            }
             long writtenBytes = Files.size(temporary);
             IoReads batch = IO_READS.get();
             boolean immediate = batch == null || file.getFileName().toString().endsWith(".pending.dat")
                     || file.getParent().getFileName().toString().equals("port-journal");
             if (immediate) {
-                try (java.nio.channels.FileChannel channel = java.nio.channels.FileChannel.open(
-                        temporary, java.nio.file.StandardOpenOption.WRITE)) { channel.force(true); }
+                try (FileChannel channel = FileChannel.open(
+                        temporary, StandardOpenOption.WRITE)) {
+                    channel.force(true);
+                }
             }
             // Do not fall back to truncating the live file if atomic replacement is unavailable.
             Files.move(temporary, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
@@ -584,6 +763,7 @@ public final class CloudworksPlayerDataManager {
             IoReads cache = IO_READS.get();
             if (cache != null) {
                 cache.tags.put(file, tag.copy());
+                cache.fileDigests.put(file, digest.digest());
                 cache.fingerprints.remove(file);
             }
         } catch (IOException e) {
@@ -592,6 +772,8 @@ public final class CloudworksPlayerDataManager {
             if (temporary != null) try {
                 Files.deleteIfExists(temporary);
             } catch (IOException ignored) {
+                Mekanism.logger.debug("Could not remove temporary Cloudworks data file {}",
+                        temporary, ignored);
             }
         }
     }
@@ -612,7 +794,11 @@ public final class CloudworksPlayerDataManager {
         if (worldDirectory == null)
             throw new IllegalArgumentException("Cloudworks world directory cannot be null");
         Path next = worldDirectory.toPath().toAbsolutePath().normalize().resolve("cloudworks");
-        if (next.equals(root)) return;
+        if (next.equals(root)) {
+            if (recoveryRequired || closing)
+                throw dataError(recoveryCause);
+            return;
+        }
         if (root != null) throw new IllegalStateException("Cloudworks world must be closed before switching saves");
         try {
             Files.createDirectories(next);
@@ -627,6 +813,7 @@ public final class CloudworksPlayerDataManager {
         cloudViews.clear();
         globalSimulatedTick = 0;
         worldEpoch++;
+        persistenceViews.clear();
         terminalSessions.clear();
         activeEdits.clear();
         pendingBlueprints.clear();
@@ -643,11 +830,16 @@ public final class CloudworksPlayerDataManager {
         ports.clear();
         portMounts.clear();
         dirtyPorts.clear();
+        teamRecoveryMounts.clear();
+        teamRecoveryBatches.clear();
+        recoveryLedgerInvalid.clear();
+        teamOwnerIds.clear();
         typeUnblockListeners.clear();
         symbolTables.clear();
         resourceIdCaches.clear();
         sessionGenerations.clear();
         machineCaches.clear();
+        specialNodeStores.clear();
         recycleBins.clear();
         pendingRecycleOverflow.clear();
         pendingUploadAcks.clear();
@@ -666,31 +858,52 @@ public final class CloudworksPlayerDataManager {
             tag.setString("id", storageId.toString());
             write(identity, tag);
         }
-        portJournal = new CloudworksPortJournal(next, new CloudworksPortJournal.Storage() {
-            @Override public NBTTagCompound read(Path file) { return CloudworksPlayerDataManager.read(file); }
-            @Override public void write(Path file, NBTTagCompound tag) { CloudworksPlayerDataManager.write(file, tag); }
-            @Override public void flush() { forcePendingProjections(); }
-        });
-        persistence = new CloudworksPersistenceQueue(ioCapacity, ioSink, "Cloudworks-IO");
         root = next;
+        loadTeamOwnerIds();
+        portJournal = new CloudworksPortJournal(next, new CloudworksPortJournal.Storage() {
+            @Override
+            public NBTTagCompound read(Path file) {
+                return CloudworksPlayerDataManager.read(file);
+            }
+
+            @Override
+            public void write(Path file, NBTTagCompound tag) {
+                CloudworksPlayerDataManager.write(file, tag);
+            }
+
+            @Override
+            public void flush() {
+                forcePendingProjections();
+            }
+        }, this::ownerDirectory);
+        persistence = new CloudworksPersistenceQueue(ioCapacity, ioSink, "Cloudworks-IO");
     }
 
     public synchronized void close() {
-        long deadlineNanos = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(120);
+        persistenceViews.clear();
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(120);
         boolean interrupted = false;
         if (parent == null) {
-            synchronized (domains) { closing = true; }
+            synchronized (domains) {
+                closing = true;
+            }
             for (CloudworksPlayerDataManager domain : domains.values()) {
                 while (persistence != null && !persistence.dead() && !domain.pendingSourceDebtWrites.isEmpty()) {
                     long remaining = deadlineNanos - System.nanoTime();
                     if (remaining <= 0) {
-                        System.err.println("Cloudworks shutdown deadline exceeded while flushing source debt");
+                        Mekanism.logger.warn(
+                                "Cloudworks shutdown deadline exceeded while flushing source debt");
                         break;
                     }
-                    synchronized (domain) { domain.flushSourceDebtWrites(); }
-                    try { persistence.drain(Math.max(1, Math.min(30_000,
-                            java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(remaining)))); }
-                    catch (InterruptedException interruption) { interrupted = true; }
+                    synchronized (domain) {
+                        domain.flushSourceDebtWrites();
+                    }
+                    try {
+                        persistence.drain(Math.max(1, Math.min(30_000,
+                                TimeUnit.NANOSECONDS.toMillis(remaining))));
+                    } catch (InterruptedException interruption) {
+                        interrupted = true;
+                    }
                 }
             }
             boolean dead = false;
@@ -702,7 +915,9 @@ public final class CloudworksPlayerDataManager {
             for (CloudworksPlayerDataManager domain : domains.values()) {
                 domain.persistence = null;
                 domain.recoveryRequired |= dead;
-                synchronized (domain) { domain.close(); }
+                synchronized (domain) {
+                    domain.close();
+                }
             }
             recoveryRequired |= dead;
         }
@@ -711,18 +926,22 @@ public final class CloudworksPlayerDataManager {
             while (!persistence.dead() && !pendingSourceDebtWrites.isEmpty()) {
                 long remaining = deadlineNanos - System.nanoTime();
                 if (remaining <= 0) {
-                    System.err.println("Cloudworks shutdown deadline exceeded while flushing source debt");
+                    Mekanism.logger.warn(
+                            "Cloudworks shutdown deadline exceeded while flushing source debt");
                     break;
                 }
                 flushSourceDebtWrites();
-                try { persistence.drain(Math.max(1, Math.min(30_000,
-                        java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(remaining)))); }
-                catch (InterruptedException interruption) { interrupted = true; }
+                try {
+                    persistence.drain(Math.max(1, Math.min(30_000,
+                            TimeUnit.NANOSECONDS.toMillis(remaining))));
+                } catch (InterruptedException interruption) {
+                    interrupted = true;
+                }
             }
             long remaining = deadlineNanos - System.nanoTime();
             if (remaining > 0) try {
                 persistence.drain(Math.max(1, Math.min(30_000,
-                        java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(remaining))));
+                        TimeUnit.NANOSECONDS.toMillis(remaining))));
             } catch (InterruptedException interruption) {
                 interrupted = true;
             }
@@ -766,20 +985,29 @@ public final class CloudworksPlayerDataManager {
                     deleteTransferIntent(pendingIntentFile(owner));
             }
             if (parent == null && root != null && Files.isDirectory(root)) {
-                try (DirectoryStream<Path> owners = Files.newDirectoryStream(root)) {
-                    for (Path ownerDirectory : owners) {
-                        if (!Files.isDirectory(ownerDirectory)) continue;
-                        try {
-                            UUID owner = UUID.fromString(ownerDirectory.getFileName().toString());
-                            if (clouds.containsKey(owner) || failedOwners.contains(owner)) continue;
-                            replayPendingTransfer(owner);
-                            if (!failedOwners.contains(owner) && Files.exists(pendingIntentFile(owner)))
-                                deleteTransferIntent(pendingIntentFile(owner));
-                        } catch (IllegalArgumentException ignored) {
+                // Owner data now lives below player/<uuid> or team/<uuid>.
+                Set<UUID> scannedOwners = new HashSet<>();
+                for (Path ownerRoot : Arrays.asList(root.resolve("player"), root.resolve("team"))) {
+                    if (!Files.isDirectory(ownerRoot)) continue;
+                    try (DirectoryStream<Path> owners = Files.newDirectoryStream(ownerRoot)) {
+                        for (Path ownerDirectory : owners) {
+                            if (!Files.isDirectory(ownerDirectory)) continue;
+                            try {
+                                UUID owner = UUID.fromString(ownerDirectory.getFileName().toString());
+                                if (!scannedOwners.add(owner)
+                                        || clouds.containsKey(owner) || failedOwners.contains(owner)) continue;
+                                replayPendingTransfer(owner);
+                                if (!failedOwners.contains(owner) && Files.exists(pendingIntentFile(owner)))
+                                    deleteTransferIntent(pendingIntentFile(owner));
+                            } catch (IllegalArgumentException ignored) {
+                                Mekanism.logger.debug(
+                                        "Skipping non-owner directory during shutdown recovery: {}",
+                                        ownerDirectory, ignored);
+                            }
                         }
+                    } catch (IOException failure) {
+                        throw dataError(failure);
                     }
-                } catch (IOException failure) {
-                    throw dataError(failure);
                 }
             }
         }
@@ -804,6 +1032,7 @@ public final class CloudworksPlayerDataManager {
         resourceIdCaches.clear();
         sessionGenerations.clear();
         machineCaches.clear();
+        specialNodeStores.clear();
         recycleBins.clear();
         if (parent == null) pendingRecycleOverflow.clear();
         pendingUploadAcks.clear();
@@ -821,6 +1050,7 @@ public final class CloudworksPlayerDataManager {
         }
         globalSimulatedTick = 0;
         root = null;
+        persistenceViews.clear();
         if (interrupted) Thread.currentThread().interrupt();
         portJournal = null;
         worldEpoch++;
@@ -862,8 +1092,12 @@ public final class CloudworksPlayerDataManager {
         if (timeoutMillis < 0) throw new IllegalArgumentException("Negative persistence wait");
         if (parent == null) {
             for (CloudworksPlayerDataManager domain : domains.values())
-                synchronized (domain) { domain.flushSourceDebtWrites(); }
-        } else synchronized (this) { flushSourceDebtWrites(); }
+                synchronized (domain) {
+                    domain.flushSourceDebtWrites();
+                }
+        } else synchronized (this) {
+            flushSourceDebtWrites();
+        }
         CloudworksPersistenceQueue queue = persistence;
         if (queue == null) return true;
         try {
@@ -948,7 +1182,9 @@ public final class CloudworksPlayerDataManager {
         return queue == null ? 0 : queue.droppedBatches();
     }
 
-    /** Test hook for the bounded interactive drain budget. */
+    /**
+     * Test hook for the bounded interactive drain budget.
+     */
     public void debugInteractionDrainMillis(long millis) {
         interactionDrainMillis = Math.max(1L, millis);
         if (parent == null) for (CloudworksPlayerDataManager domain : domains.values())
@@ -1017,8 +1253,14 @@ public final class CloudworksPlayerDataManager {
                     ProductionLineData line = ProductionLineData.read(tag.copy());
                     if (owner.equals(line.owner()) && id.equals(line.lineId())) {
                         CloudworksTopologyValidator.Result topology = CloudworksTopologyValidator.validate(line);
-                        if (!topology.valid())
-                            throw new IllegalArgumentException("Invalid persisted topology: " + topology.reason());
+                        if (!topology.valid()) {
+                            if (!"editor_transfer_channels_direct".equals(topology.errorKey()))
+                                throw new IllegalArgumentException("Invalid persisted topology: " + topology.reason());
+                            line.setEnabled(false);
+                            if (Mekanism.logger != null)
+                                Mekanism.logger.warn(
+                                        "Stopped Cloudworks line {} with a forbidden transfer boundary connection", id);
+                        }
                         lines.put(id, line);
                         guiLines.put(id, line.write());
                         checkpointGenerations.put(id, generation);
@@ -1042,8 +1284,8 @@ public final class CloudworksPlayerDataManager {
                         throw CloudworksBlueprint.invalid();
                     if (pendingBlueprint != null) pendingBlueprints.put(owner, pendingBlueprint);
                 } catch (RuntimeException failure) {
-                    if (mekanism.common.Mekanism.logger != null)
-                        mekanism.common.Mekanism.logger.warn("Rejected Cloudworks pending blueprint {}", blueprintFile, failure);
+                    if (Mekanism.logger != null)
+                        Mekanism.logger.warn("Rejected Cloudworks pending blueprint {}", blueprintFile, failure);
                     try {
                         Files.deleteIfExists(blueprintFile);
                     } catch (IOException deleteFailure) {
@@ -1062,6 +1304,52 @@ public final class CloudworksPlayerDataManager {
             guiRecycle.put(owner, recycleBin(owner).write());
             return cloud;
         }
+    }
+
+    /**
+     * Loads an existing cloud record without creating state for an unknown owner.
+     */
+    CloudworksData loadIfExists(UUID owner) {
+        if (parent == null) return domain(owner).loadIfExists(owner);
+        synchronized (this) {
+            Objects.requireNonNull(owner);
+            requireLoaded();
+            if (recoveryRequired || failedOwners.contains(owner))
+                throw dataError(ownerFailureCauses.getOrDefault(owner, recoveryCause));
+            CloudworksData cached = clouds.get(owner);
+            if (cached != null) return cached;
+            return Files.exists(cloudFile(owner)) ? getOrCreate(owner) : null;
+        }
+    }
+
+    public CloudworksSpecialNodeStore.Snapshot specialNodeSnapshot(UUID owner) {
+        if (parent == null) return domain(owner).specialNodeSnapshot(owner);
+        synchronized (this) {
+            requireLoaded();
+            requireEnabled(owner);
+            return specialNodeStore(owner).load();
+        }
+    }
+
+    public CloudworksSpecialNodeStore.AddResult addInfiniteResourceCard(
+            UUID owner, CloudworksInfiniteResourceCardData card) {
+        if (parent == null) return domain(owner).addInfiniteResourceCard(owner, card);
+        synchronized (this) {
+            requireLoaded();
+            CloudworksData cloud = requireEnabled(owner).copyForRuntime();
+            CloudworksSpecialNodeStore store = specialNodeStore(owner);
+            CloudworksSpecialNodeStore.Change change = store.load().add(card);
+            if (change.result == CloudworksSpecialNodeStore.AddResult.DUPLICATE) return change.result;
+            store.requireWritable();
+            publish0(owner, cloud.write(), Collections.emptyList(), null, null, null, null,
+                    true, false, null, Collections.emptyList(), change.next);
+            return change.result;
+        }
+    }
+
+    private CloudworksSpecialNodeStore specialNodeStore(UUID owner) {
+        return specialNodeStores.computeIfAbsent(owner, id -> new CloudworksSpecialNodeStore(
+                specialNodeDirectory(id), CloudworksPlayerDataManager::read));
     }
 
     private int discardWaitingNodes(ProductionLineData line) {
@@ -1097,8 +1385,8 @@ public final class CloudworksPlayerDataManager {
                 throw failure;
             }
         }
-        if (removed > 0 && mekanism.common.Mekanism.logger != null)
-            mekanism.common.Mekanism.logger.warn("Removed {} orphan Cloudworks blueprint nodes for owner {}", removed, owner);
+        if (removed > 0 && Mekanism.logger != null)
+            Mekanism.logger.warn("Removed {} orphan Cloudworks blueprint nodes for owner {}", removed, owner);
     }
 
     private void discardLegacyPendingFromIntent(NBTTagCompound intent) {
@@ -1130,14 +1418,14 @@ public final class CloudworksPlayerDataManager {
             if (intent.hasKey("nextFingerprints", 10))
                 intent.getCompoundTag("nextFingerprints").setByteArray("blueprintPending",
                         projectionFingerprint(intent, "blueprintPending", emptyPending));
-            if (mekanism.common.Mekanism.logger != null)
-                mekanism.common.Mekanism.logger.warn(
+            if (Mekanism.logger != null)
+                Mekanism.logger.warn(
                         "Discarded legacy Cloudworks pending blueprint from recovery intent; removed {} waiting nodes", removed);
         }
     }
 
     private void cleanupUnindexedLineFiles(UUID owner, CloudworksData cloud) {
-        Path production = root.resolve(owner.toString()).resolve("production");
+        Path production = ownerDirectory(owner).resolve("production");
         if (!Files.isDirectory(production)) return;
         Set<UUID> indexed = new HashSet<>(cloud.lineIds());
         int removed = 0;
@@ -1147,16 +1435,19 @@ public final class CloudworksPlayerDataManager {
                 boolean runtime = name.endsWith(".runtime.dat");
                 String uuidText = name.substring(0, name.length() - (runtime ? 12 : 4));
                 UUID id;
-                try { id = UUID.fromString(uuidText); }
-                catch (IllegalArgumentException ignored) { continue; }
+                try {
+                    id = UUID.fromString(uuidText);
+                } catch (IllegalArgumentException ignored) {
+                    continue;
+                }
                 if (indexed.contains(id)) continue;
                 if (Files.deleteIfExists(file)) removed++;
             }
-        } catch (IOException | java.nio.file.DirectoryIteratorException failure) {
+        } catch (IOException | DirectoryIteratorException failure) {
             throw dataError(failure);
         }
-        if (removed > 0 && mekanism.common.Mekanism.logger != null)
-            mekanism.common.Mekanism.logger.warn("Removed {} unindexed Cloudworks production files for owner {}",
+        if (removed > 0 && Mekanism.logger != null)
+            Mekanism.logger.warn("Removed {} unindexed Cloudworks production files for owner {}",
                     removed, owner);
     }
 
@@ -1170,7 +1461,9 @@ public final class CloudworksPlayerDataManager {
             CloudworksPlayerDataManager target = domains.get(owner);
             return target != null && target.portMounted(owner, id, holder);
         }
-        synchronized (this) { return root != null && portMounts.get(id) == holder; }
+        synchronized (this) {
+            return root != null && portMounts.get(id) == holder;
+        }
     }
 
     public CloudworksPortRecord mountPort(UUID owner, UUID id, boolean input, Object holder, boolean fresh) {
@@ -1182,13 +1475,18 @@ public final class CloudworksPlayerDataManager {
             if (portMounts.containsKey(id) && portMounts.get(id) != holder) return null;
             CloudworksPortRecord record = ports.get(id);
             if (record == null) {
-                Path file = root.resolve(owner.toString()).resolve("ports").resolve(id + ".dat");
+                Path file = ownerDirectory(owner).resolve("ports").resolve(id + ".dat");
                 if (Files.exists(file)) record = CloudworksPortRecord.read(read(file));
                 else if (fresh) {
                     record = CloudworksPortRecord.empty(id, owner, input);
                     dirtyPorts.add(id);
+                } else {
+                    Mekanism.logger.warn(
+                            "Cloudworks port record {} for owner {} is missing; recreating an empty buffer",
+                            id, owner);
+                    record = CloudworksPortRecord.empty(id, owner, input);
+                    dirtyPorts.add(id);
                 }
-                else throw dataError(null);
                 ports.put(id, record);
             }
             if (!record.id.equals(id) || !record.owner.equals(owner) || record.input != input) throw dataError(null);
@@ -1198,12 +1496,20 @@ public final class CloudworksPlayerDataManager {
     }
 
     public void unmountPort(UUID owner, UUID id, Object holder) {
-        if (parent == null) { domain(owner).unmountPort(owner, id, holder); return; }
-        synchronized (this) { portMounts.remove(id, holder); }
+        if (parent == null) {
+            domain(owner).unmountPort(owner, id, holder);
+            return;
+        }
+        synchronized (this) {
+            portMounts.remove(id, holder);
+        }
     }
 
     public void savePort(UUID owner, UUID id, Object holder, CloudworksPortRecord record) {
-        if (parent == null) { domain(owner).savePort(owner, id, holder, record); return; }
+        if (parent == null) {
+            domain(owner).savePort(owner, id, holder, record);
+            return;
+        }
         synchronized (this) {
             if (!portMounted(owner, id, holder) || !record.id.equals(id)
                     || !record.owner.equals(owner) || record.input != ports.get(id).input) throw error("busy");
@@ -1227,12 +1533,15 @@ public final class CloudworksPlayerDataManager {
         }
         synchronized (this) {
             for (Object holder : new ArrayList<>(portMounts.values()))
-                if (holder instanceof mekanism.cloudworks.common.content.CloudworksPortBinding binding) binding.flush();
+                if (holder instanceof CloudworksPortBinding binding) binding.flush();
         }
     }
 
     public void capturePort(UUID owner, UUID id, Object holder, CloudworksPortRecord record) {
-        if (parent == null) { domain(owner).capturePort(owner, id, holder, record); return; }
+        if (parent == null) {
+            domain(owner).capturePort(owner, id, holder, record);
+            return;
+        }
         synchronized (this) {
             if (!portMounted(owner, id, holder) || !record.id.equals(id) || !record.owner.equals(owner))
                 throw error("busy");
@@ -1254,8 +1563,12 @@ public final class CloudworksPlayerDataManager {
             for (UUID id : new ArrayList<>(dirtyPorts)) {
                 NBTTagCompound operation = new NBTTagCompound();
                 operation.setTag("port", ports.get(id).write());
-                try { publishPort(owner, operation); dirtyPorts.remove(id); }
-                catch (RuntimeException busy) { return; }
+                try {
+                    publishPort(owner, operation);
+                    dirtyPorts.remove(id);
+                } catch (RuntimeException busy) {
+                    return;
+                }
             }
             NBTTagCompound maintenance = new NBTTagCompound();
             maintenance.setInteger("schema", 3);
@@ -1263,22 +1576,25 @@ public final class CloudworksPlayerDataManager {
             try {
                 portMaintenancePending = true;
                 persistence.submitIntent(owner, maintenance);
-            } catch (RuntimeException busy) { portMaintenancePending = false; }
+            } catch (RuntimeException busy) {
+                portMaintenancePending = false;
+            }
         }
     }
 
-    public int transferPort(UUID owner, UUID id, Object holder, List<mekanism.api.inventory.IInventorySlot> slots,
-            List<mekanism.cloudworks.common.content.CloudworksHybridTank> tanks, double energy,
-            java.util.function.DoubleConsumer setEnergy, boolean[] grace) {
+    public int transferPort(UUID owner, UUID id, Object holder, List<IInventorySlot> slots,
+                            List<CloudworksHybridTank> tanks, double energy,
+                            DoubleConsumer setEnergy, boolean[] grace) {
         return transferPort(owner, id, holder, slots, tanks, energy,
-                mekanism.cloudworks.common.tile.prefab.TileEntityCloudworksPort.MAX_ENERGY, setEnergy, grace);
+                TileEntityCloudworksPort.MAX_ENERGY, setEnergy, grace);
     }
 
-    public int transferPort(UUID owner, UUID id, Object holder, List<mekanism.api.inventory.IInventorySlot> slots,
-            List<mekanism.cloudworks.common.content.CloudworksHybridTank> tanks, double energy, double maxEnergy,
-            java.util.function.DoubleConsumer setEnergy, boolean[] grace) {
+    public int transferPort(UUID owner, UUID id, Object holder, List<IInventorySlot> slots,
+                            List<CloudworksHybridTank> tanks, double energy, double maxEnergy,
+                            DoubleConsumer setEnergy, boolean[] grace) {
         if (!Double.isFinite(maxEnergy) || maxEnergy < 0) throw new IllegalArgumentException("Invalid port capacity");
-        if (parent == null) return domain(owner).transferPort(owner, id, holder, slots, tanks, energy, maxEnergy, setEnergy, grace);
+        if (parent == null)
+            return domain(owner).transferPort(owner, id, holder, slots, tanks, energy, maxEnergy, setEnergy, grace);
         synchronized (this) {
             if (!portMounted(owner, id, holder)) throw error("busy");
             CloudworksData cloud = requireEnabled(owner);
@@ -1293,39 +1609,37 @@ public final class CloudworksPlayerDataManager {
             int blocked = -1;
             try {
                 if (before.input) {
-                    mekanism.cloudworks.common.content.CloudworksPortIo.UploadPlan plan =
-                            mekanism.cloudworks.common.content.CloudworksPortIo.planUpload(slots, tanks,
-                                    descriptor -> cloud.receiving().insertable(descriptor, Long.MAX_VALUE), grace,
+                    CloudworksPortIo.UploadPlan plan =
+                            CloudworksPortIo.planUpload(slots, tanks,
+                                    descriptor -> cloud.receiving().insertable(descriptor, Long.MAX_VALUE,
+                                            cloud.effectiveWarehouseItemCap()), grace,
                                     cloud.receiving().room());
-                    if (plan.pauses()) {
-                        savePort(owner, id, holder, before);
-                        return plan.pauseIndex;
-                    }
+                    if (plan.pauses()) blocked = plan.pauseIndex;
                     for (Map.Entry<QIOResourceDescriptor, Long> entry : plan.fitting.entrySet()) {
                         resourceIds.put(entry.getKey(), resourceId(owner, entry.getKey()));
-                        cloud.receiving().insert(entry.getKey(), entry.getValue());
+                        cloud.receiving().insert(entry.getKey(), entry.getValue(), cloud.effectiveWarehouseItemCap());
                         moved.put(entry.getKey(), entry.getValue());
                     }
-                    mekanism.cloudworks.common.content.CloudworksPortIo.applyDrains(slots, tanks, plan.takes);
+                    CloudworksPortIo.applyDrains(slots, tanks, plan.takes);
                     double accepted = Math.min(energy, Math.max(0D, cloud.receivingEnergyCapacity() - previousEnergy));
                     nextPortEnergy -= accepted;
                     nextWarehouseEnergy += accepted;
                 } else {
                     Map<QIOResourceDescriptor, Long> available = cloud.sending().snapshot();
                     Map<QIOResourceDescriptor, Long> request =
-                            mekanism.cloudworks.common.content.CloudworksPortIo.buildRequest(available, slots, tanks);
+                            CloudworksPortIo.buildRequest(available, slots, tanks);
                     for (Map.Entry<QIOResourceDescriptor, Long> entry : request.entrySet()) {
                         resourceIds.put(entry.getKey(), resourceId(owner, entry.getKey()));
                         long amount = cloud.sending().extract(entry.getKey(), entry.getValue());
                         moved.put(entry.getKey(), amount);
-                        mekanism.cloudworks.common.content.CloudworksPortIo.insertPlanned(slots, tanks, entry.getKey(), amount);
+                        CloudworksPortIo.insertPlanned(slots, tanks, entry.getKey(), amount);
                     }
                     double taken = Math.min(previousEnergy, Math.max(0D,
                             maxEnergy - energy));
                     nextPortEnergy += taken;
                     nextWarehouseEnergy -= taken;
                     boolean supported = available.keySet().stream().anyMatch(
-                            mekanism.cloudworks.common.content.CloudworksPortIo::isSupportedDownloadResource);
+                            CloudworksPortIo::isSupportedDownloadResource);
                     if (request.isEmpty() && supported || taken == 0 && previousEnergy > 0) blocked = 0;
                 }
                 String warehouse = before.input ? "receiving" : "sending";
@@ -1373,15 +1687,15 @@ public final class CloudworksPlayerDataManager {
             for (Map.Entry<QIOResourceDescriptor, Long> entry : moved.entrySet()) {
                 changedFromRuntime(owner);
                 recordRuntimeIngress(owner, before.input
-                        ? mekanism.cloudworks.common.runtime.CloudworksExternalEvent.Kind.RECEIVING_RESOURCE
-                        : mekanism.cloudworks.common.runtime.CloudworksExternalEvent.Kind.SENDING_RESOURCE,
+                                ? CloudworksExternalEvent.Kind.RECEIVING_RESOURCE
+                                : CloudworksExternalEvent.Kind.SENDING_RESOURCE,
                         resourceIds.get(entry.getKey()), entry.getValue(), 0);
             }
             if (nextWarehouseEnergy != previousEnergy) {
                 changedFromRuntime(owner);
                 recordRuntimeIngress(owner, before.input
-                        ? mekanism.cloudworks.common.runtime.CloudworksExternalEvent.Kind.RECEIVING_ENERGY
-                        : mekanism.cloudworks.common.runtime.CloudworksExternalEvent.Kind.SENDING_ENERGY,
+                                ? CloudworksExternalEvent.Kind.RECEIVING_ENERGY
+                                : CloudworksExternalEvent.Kind.SENDING_ENERGY,
                         -1, 0, Math.abs(nextWarehouseEnergy - previousEnergy));
             }
             durableCloudBaselines.put(owner, cloud.copyForRuntime());
@@ -1391,12 +1705,28 @@ public final class CloudworksPlayerDataManager {
 
     private void clearGuiSources() {
         runtimeUnmaterialized.clear();
+        runtimeLineSnapshots.clear();
         guiLines.clear();
         guiMachines.clear();
         guiRecycle.clear();
     }
 
-    /** Only copies the small line index. Frozen payloads are decoded after releasing the manager lock. */
+    /** Reader boundary: current immutable values are materialized once per publication. */
+    private NBTTagCompound publishedLineTag(UUID id) {
+        NBTTagCompound tag = guiLines.get(id);
+        if (tag == null) {
+            mekanism.cloudworks.common.runtime.CloudworksRuntimeLineSnapshot snapshot = runtimeLineSnapshots.get(id);
+            if (snapshot != null) {
+                tag = snapshot.write();
+                guiLines.put(id, tag);
+            }
+        }
+        return tag;
+    }
+
+    /**
+     * Only copies the small line index. Frozen payloads are decoded after releasing the manager lock.
+     */
     public CloudworksGuiSource guiSource(UUID owner) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
@@ -1411,7 +1741,8 @@ public final class CloudworksPlayerDataManager {
             }
             return new CloudworksGuiSource(cloud, tags, guiMachines.get(owner),
                     guiRecycle.get(owner), commandRevisions.get(owner),
-                    parent == null ? globalSimulatedTick : parent.globalSimulatedTick);
+                    parent == null ? globalSimulatedTick : parent.globalSimulatedTick,
+                    specialNodeStore(owner).load(), runtimeLineSnapshots);
         }
     }
 
@@ -1426,7 +1757,9 @@ public final class CloudworksPlayerDataManager {
         }
     }
 
-    /** Optimistic GUI control version; progress and physical port movement do not invalidate a command. */
+    /**
+     * Optimistic GUI control version; progress and physical port movement do not invalidate a command.
+     */
     public long commandRevision(UUID owner) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
@@ -1475,16 +1808,18 @@ public final class CloudworksPlayerDataManager {
     private void changed(UUID owner) {
         changedFromRuntime(owner);
         commandRevisions.put(owner, Math.addExact(commandRevisions.get(owner), 1));
+        CloudworksAPI.emit(new CloudworksEvent(owner, null,
+                CloudworksEvent.Kind.CLOUD_CHANGED, revisions.get(owner), 1, ""));
     }
 
     private void changedFromRuntime(UUID owner) {
         revisions.put(owner, Math.addExact(revisions.get(owner), 1));
     }
 
-    private void recordRuntimeIngress(UUID owner, mekanism.cloudworks.common.runtime.CloudworksExternalEvent.Kind kind,
-            int resource, long amount, double energy) {
+    private void recordRuntimeIngress(UUID owner, CloudworksExternalEvent.Kind kind,
+                                      int resource, long amount, double energy) {
         runtimeIngress.computeIfAbsent(owner, ignored ->
-                new mekanism.cloudworks.common.runtime.CloudworksRuntimeIngressJournal())
+                        new CloudworksRuntimeIngressJournal())
                 .record(revisions.get(owner), kind, resource, amount, energy);
     }
 
@@ -1494,7 +1829,7 @@ public final class CloudworksPlayerDataManager {
             return target.runtimeExternalSequence(owner);
         }
         synchronized (this) {
-            mekanism.cloudworks.common.runtime.CloudworksRuntimeIngressJournal journal = runtimeIngress.get(owner);
+            CloudworksRuntimeIngressJournal journal = runtimeIngress.get(owner);
             return journal == null ? 0 : journal.sequence();
         }
     }
@@ -1507,19 +1842,19 @@ public final class CloudworksPlayerDataManager {
         synchronized (this) {
             long current = revisions.getOrDefault(owner, -1L);
             if (current == previousRevision) return true;
-            mekanism.cloudworks.common.runtime.CloudworksRuntimeIngressJournal journal = runtimeIngress.get(owner);
+            CloudworksRuntimeIngressJournal journal = runtimeIngress.get(owner);
             return journal != null && journal.covers(previousRevision, current);
         }
     }
 
-    public List<mekanism.cloudworks.common.runtime.CloudworksExternalEvent> runtimeIngressAfter(
+    public List<CloudworksExternalEvent> runtimeIngressAfter(
             UUID owner, long sequence) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
             return target.runtimeIngressAfter(owner, sequence);
         }
         synchronized (this) {
-            mekanism.cloudworks.common.runtime.CloudworksRuntimeIngressJournal journal = runtimeIngress.get(owner);
+            CloudworksRuntimeIngressJournal journal = runtimeIngress.get(owner);
             return journal == null ? sequence == 0 ? Collections.emptyList() : null : journal.after(sequence);
         }
     }
@@ -1531,7 +1866,7 @@ public final class CloudworksPlayerDataManager {
         }
         synchronized (this) {
             if (runtimeUnmaterialized.contains(id)) {
-                NBTTagCompound published = guiLines.get(id);
+                NBTTagCompound published = publishedLineTag(id);
                 if (published == null) throw new IllegalStateException("Missing Runtime line publication");
                 lines.put(id, ProductionLineData.read(published.copy()));
                 runtimeUnmaterialized.remove(id);
@@ -1540,7 +1875,9 @@ public final class CloudworksPlayerDataManager {
         }
     }
 
-    /** Normal tick eligibility reads metadata only, not machine inventories. */
+    /**
+     * Normal tick eligibility reads metadata only, not machine inventories.
+     */
     public List<UUID> runtimeLineIds(CloudworksData cloud, CloudworksSessionPolicy sessions) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(cloud.owner());
@@ -1549,10 +1886,16 @@ public final class CloudworksPlayerDataManager {
         synchronized (this) {
             List<UUID> selected = new ArrayList<>();
             for (UUID id : cloud.lineIds()) {
+                mekanism.cloudworks.common.runtime.CloudworksRuntimeLineSnapshot snapshot = runtimeLineSnapshots.get(id);
+                if (snapshot != null) {
+                    if (snapshot.explicitRouting() && sessions.canRun(cloud, snapshot.owner(),
+                            snapshot.enabled(), snapshot.runWhileOwnerOffline())) selected.add(id);
+                    continue;
+                }
                 NBTTagCompound tag = guiLines.get(id);
                 if (tag != null && tag.getBoolean("explicitRouting")
                         && sessions.canRun(cloud, UUID.fromString(tag.getString("owner")),
-                            tag.getBoolean("enabled"), tag.getBoolean("runWhileOwnerOffline"))) selected.add(id);
+                        tag.getBoolean("enabled"), tag.getBoolean("runWhileOwnerOffline"))) selected.add(id);
             }
             return selected;
         }
@@ -1627,7 +1970,7 @@ public final class CloudworksPlayerDataManager {
      * cloud yields an empty snapshot; null is returned only when the manager refuses
      * the read (not loaded, recovery required, failed owner).
      */
-    public Map<mekanism.api.qio.resource.QIOResourceDescriptor, Long> sendingSnapshot(UUID owner) {
+    public Map<QIOResourceDescriptor, Long> sendingSnapshot(UUID owner) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
             return target.sendingSnapshot(owner);
@@ -1657,7 +2000,7 @@ public final class CloudworksPlayerDataManager {
     /**
      * Read-only receiving-warehouse snapshot (三仓查看 display view).
      */
-    public Map<mekanism.api.qio.resource.QIOResourceDescriptor, Long> receivingSnapshot(UUID owner) {
+    public Map<QIOResourceDescriptor, Long> receivingSnapshot(UUID owner) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
             return target.receivingSnapshot(owner);
@@ -1674,7 +2017,7 @@ public final class CloudworksPlayerDataManager {
     /**
      * Read-only transfer-warehouse snapshot (三仓查看 display view).
      */
-    public Map<mekanism.api.qio.resource.QIOResourceDescriptor, Long> transferSnapshot(UUID owner) {
+    public Map<QIOResourceDescriptor, Long> transferSnapshot(UUID owner) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
             return target.transferSnapshot(owner);
@@ -1698,13 +2041,13 @@ public final class CloudworksPlayerDataManager {
             return target.machineCacheVariants(owner, typeIndex);
         }
         synchronized (this) {
-            mekanism.cloudworks.common.data.CloudworksMachineCache cache = machineCache(owner);
+            CloudworksMachineCache cache = machineCache(owner);
             if (typeIndex < 0 || typeIndex >= cache.typeCount()) throw error("not_found");
             Map<Integer, Map<NBTTagCompound, Long>> occupied = deriveOccupation(owner, cache);
             Map<NBTTagCompound, Long> byTag = occupied.getOrDefault(typeIndex, Collections.emptyMap());
             List<Map<String, Object>> view = new ArrayList<>();
-            List<mekanism.cloudworks.common.data.CloudworksMachineCache.Entry> entries = cache.entries();
-            for (mekanism.cloudworks.common.data.CloudworksMachineCache.Variant variant : entries.get(typeIndex).variants()) {
+            List<CloudworksMachineCache.Entry> entries = cache.entries();
+            for (CloudworksMachineCache.Variant variant : entries.get(typeIndex).variants()) {
                 long claimed = byTag.getOrDefault(variant.tag(), 0L);
                 Map<String, Object> row = new LinkedHashMap<>();
                 ItemStack machine = entries.get(typeIndex).template();
@@ -1728,13 +2071,14 @@ public final class CloudworksPlayerDataManager {
      * both port call sites already catch and retry the whole cycle without
      * touching their pause state.
      */
-    public long receivingRoom(UUID owner, mekanism.api.qio.resource.QIOResourceDescriptor descriptor) {
+    public long receivingRoom(UUID owner, QIOResourceDescriptor descriptor) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
             return target.receivingRoom(owner, descriptor);
         }
         synchronized (this) {
-            return getOrCreate(owner).receiving().insertable(descriptor, Long.MAX_VALUE);
+            CloudworksData cloud = getOrCreate(owner);
+            return cloud.receiving().insertable(descriptor, Long.MAX_VALUE, cloud.effectiveWarehouseItemCap());
         }
     }
 
@@ -1772,7 +2116,9 @@ public final class CloudworksPlayerDataManager {
         }
     }
 
-    /** 删线/卸机器溢出回池（内部路径——调用方在同一意图里已携带 cloud 投影）。 */
+    /**
+     * 删线/卸机器溢出回池（内部路径——调用方在同一意图里已携带 cloud 投影）。
+     */
     private void returnUpgradesToPool(CloudworksData cloud, int speedCount, int energyCount) {
         if (speedCount > 0) cloud.addUpgradePool(true, speedCount);
         if (energyCount > 0) cloud.addUpgradePool(false, energyCount);
@@ -1783,7 +2129,25 @@ public final class CloudworksPlayerDataManager {
         double storedEnergy = line.energy();
         line.recomputeUpgradeLimits();
         returnUpgradesToPool(cloud, speed - line.speedUpgrades(), energy - line.energyUpgrades());
+        settleNodeCustomUpgrades(cloud, line,
+                CloudworksUpgradeLimits.customAssignments(line.machines()));
         settleLineEnergy(cloud, line, storedEnergy);
+    }
+
+    /**
+     * The line carrier backs node-owned assets; unused amounts always belong in the cloud.
+     */
+    private void settleNodeCustomUpgrades(CloudworksData cloud, ProductionLineData line,
+                                          Map<ResourceLocation, Long> assigned) {
+        Set<ResourceLocation> types = new LinkedHashSet<>();
+        line.customUpgradePool().ids().forEach(types::add);
+        types.addAll(assigned.keySet());
+        for (ResourceLocation type : types) {
+            long delta = assigned.getOrDefault(type, 0L) - line.customUpgradePool().count(type);
+            if (delta > cloud.customUpgradePool().count(type)) throw error("pool_empty");
+            cloud.customUpgradePool().add(type, -delta);
+        }
+        line.customUpgradePool().setAll(assigned);
     }
 
     private void settleLineEnergy(CloudworksData cloud, ProductionLineData line, double storedEnergy) {
@@ -1795,8 +2159,8 @@ public final class CloudworksPlayerDataManager {
         }
     }
 
-    public void registerTypeUnblockListener(UUID owner, mekanism.api.qio.resource.QIOResourceDescriptor descriptor,
-                                                         Runnable callback) {
+    public void registerTypeUnblockListener(UUID owner, QIOResourceDescriptor descriptor,
+                                            Runnable callback) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
             target.registerTypeUnblockListener(owner, descriptor, callback);
@@ -1811,15 +2175,15 @@ public final class CloudworksPlayerDataManager {
         }
     }
 
-    public void unregisterTypeUnblockListener(UUID owner, mekanism.api.qio.resource.QIOResourceDescriptor descriptor,
-                                                           Runnable callback) {
+    public void unregisterTypeUnblockListener(UUID owner, QIOResourceDescriptor descriptor,
+                                              Runnable callback) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
             target.unregisterTypeUnblockListener(owner, descriptor, callback);
             return;
         }
         synchronized (this) {
-            Map<mekanism.api.qio.resource.QIOResourceDescriptor, List<Runnable>> byType = typeUnblockListeners.get(owner);
+            Map<QIOResourceDescriptor, List<Runnable>> byType = typeUnblockListeners.get(owner);
             if (byType == null) return;
             List<Runnable> callbacks = byType.get(descriptor);
             if (callbacks == null || !callbacks.remove(callback)) return;
@@ -1838,17 +2202,18 @@ public final class CloudworksPlayerDataManager {
         }
         synchronized (this) {
             if (typeUnblockListeners.isEmpty()) return;
-            Iterator<Map.Entry<UUID, Map<mekanism.api.qio.resource.QIOResourceDescriptor, List<Runnable>>>> ownerIterator
+            Iterator<Map.Entry<UUID, Map<QIOResourceDescriptor, List<Runnable>>>> ownerIterator
                     = typeUnblockListeners.entrySet().iterator();
             while (ownerIterator.hasNext()) {
-                Map.Entry<UUID, Map<mekanism.api.qio.resource.QIOResourceDescriptor, List<Runnable>>> ownerEntry = ownerIterator.next();
+                Map.Entry<UUID, Map<QIOResourceDescriptor, List<Runnable>>> ownerEntry = ownerIterator.next();
                 CloudworksData cloud = clouds.get(ownerEntry.getKey());
                 if (cloud == null) continue;
-                Iterator<Map.Entry<mekanism.api.qio.resource.QIOResourceDescriptor, List<Runnable>>> typeIterator
+                Iterator<Map.Entry<QIOResourceDescriptor, List<Runnable>>> typeIterator
                         = ownerEntry.getValue().entrySet().iterator();
                 while (typeIterator.hasNext()) {
-                    Map.Entry<mekanism.api.qio.resource.QIOResourceDescriptor, List<Runnable>> typeEntry = typeIterator.next();
-                    if (cloud.receiving().insertable(typeEntry.getKey(), 1L) <= 0) continue;
+                    Map.Entry<QIOResourceDescriptor, List<Runnable>> typeEntry = typeIterator.next();
+                    if (cloud.receiving().insertable(typeEntry.getKey(), 1L,
+                            cloud.effectiveWarehouseItemCap()) <= 0) continue;
                     typeIterator.remove();
                     for (Runnable callback : new ArrayList<>(typeEntry.getValue())) {
                         try {
@@ -1931,6 +2296,1038 @@ public final class CloudworksPlayerDataManager {
         }
     }
 
+    /**
+     * Creates a durable recovery record before a player team disappears.
+     * Team data remains in the normal owner directory until a recovery block
+     * completes the transfer.
+     */
+    public void markTeamDissolved(UUID teamOwner, String teamId, short teamUid, UUID lastOwner) {
+        if (parent == null) {
+            domain(teamOwner).markTeamDissolved(teamOwner, teamId, teamUid, lastOwner);
+            return;
+        }
+        synchronized (this) {
+            if (root == null) return;
+            Path playerOwner = root.resolve("player").resolve(teamOwner.toString());
+            Path teamOwnerPath = root.resolve("team").resolve(teamOwner.toString());
+            // A team is normally classified before its first write.  If a
+            // same-session caller wrote it while the registry was unavailable,
+            // finish the projection and move that owner directory once; this
+            // is an identity correction, not migration of old world data.
+            if (!Files.isDirectory(teamOwnerPath) && Files.isDirectory(playerOwner)) {
+                if (!awaitPersistence(10_000)) throw error("busy");
+                try {
+                    Files.createDirectories(teamOwnerPath.getParent());
+                    try {
+                        Files.move(playerOwner, teamOwnerPath, StandardCopyOption.ATOMIC_MOVE);
+                    } catch (AtomicMoveNotSupportedException unsupported) {
+                        Files.move(playerOwner, teamOwnerPath);
+                    }
+                } catch (IOException failure) {
+                    throw dataError(failure);
+                }
+            }
+            // The team registry may remove a dissolved team before this
+            // recovery record is written. Preserve the owner kind explicitly
+            // so all subsequent recovery access stays under team/<uuid>.
+            teamOwnerIds.add(teamOwner);
+            if (!recordEnabled(teamOwner) && !Files.exists(cloudFile(teamOwner))) return;
+            synchronized (teamRecoveryLock) {
+                NBTTagCompound rootTag = Files.exists(teamRecoveryFile()) ? read(teamRecoveryFile()) : new NBTTagCompound();
+                rootTag.setInteger("schema", 1);
+                NBTTagList entries = rootTag.getTagList("entries", 10);
+                boolean exists = false;
+                for (int i = 0; i < entries.tagCount(); i++) {
+                    if (teamOwner.toString().equals(entries.getCompoundTagAt(i).getString("owner"))) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) {
+                    entries.appendTag(recoveryEntry(teamOwner, teamId, teamUid, lastOwner, "DISSOLVED"));
+                    rootTag.setTag("entries", entries);
+                    write(teamRecoveryFile(), rootTag);
+                }
+            }
+            if (Files.exists(cloudFile(teamOwner))) {
+                CloudworksData cloud = getOrCreate(teamOwner);
+                cloud.setEnabled(false);
+                persistCloudCore(teamOwner, cloud);
+            }
+        }
+    }
+
+    public UUID findDissolvedTeam(UUID lastOwner) {
+        if (parent == null) return domain(lastOwner).findDissolvedTeam(lastOwner);
+        synchronized (teamRecoveryLock) {
+            if (root == null || !Files.exists(teamRecoveryFile())) return null;
+            NBTTagList entries = read(teamRecoveryFile()).getTagList("entries", 10);
+            for (int i = 0; i < entries.tagCount(); i++) {
+                NBTTagCompound entry = entries.getCompoundTagAt(i);
+                if (!"DISSOLVED".equals(entry.getString("status"))
+                        && !"RECOVERING".equals(entry.getString("status"))
+                        || !entry.hasKey("lastOwner", 8)
+                        || !lastOwner.toString().equals(entry.getString("lastOwner"))) continue;
+                return UUID.fromString(entry.getString("owner"));
+            }
+            return null;
+        }
+    }
+
+    public boolean hasCloudRecord(UUID owner) {
+        if (parent == null ? cloudViews.containsKey(owner) : clouds.containsKey(owner)) return true;
+        return root != null && Files.exists(cloudFile(owner));
+    }
+
+    /**
+     * Main-thread capture only; the team recovery transaction does all disk work on its worker.
+     */
+    public void captureMountedTeamPorts(UUID owner) {
+        CloudworksPlayerDataManager target = parent == null ? domains.get(owner) : this;
+        if (target == null) return;
+        List<Object> mounts;
+        synchronized (target) {
+            mounts = new ArrayList<>(target.portMounts.values());
+        }
+        for (Object mount : mounts)
+            if (mount instanceof CloudworksPortBinding binding) binding.capture();
+    }
+
+    /**
+     * Moves a dissolved team's cloud into the recovering player's cloud and
+     * deletes the old owner directory only after all projections are empty.
+     */
+    // =====================================================================================
+    // Team recovery machine drain (2026-10-18 v3): a take-only output port bound to the
+    // dissolved team's cloud. The estate is drained piece by piece into a descriptor-generic
+    // buffer (QIO storage semantics — every family), journal-first for crash safety.
+    // =====================================================================================
+
+    private static final long RECOVERY_BUFFER_CAPACITY = Long.MAX_VALUE / 2;
+
+    private Path recoveryBufferFile(UUID teamOwner) {
+        return ownerDirectory(teamOwner).resolve("recovery-buffer.dat");
+    }
+
+    private Path recoveryJournalFile(UUID teamOwner) {
+        return ownerDirectory(teamOwner).resolve("recovery-journal.dat");
+    }
+
+    private long recoveryLastBatch(UUID teamOwner) {
+        return teamRecoveryBatches.getOrDefault(teamOwner, 0L);
+    }
+
+    /**
+     * Claims the estate's single live output buffer for one physical recovery block.
+     */
+    public boolean mountTeamRecovery(UUID teamOwner, Object holder) {
+        if (parent == null) return domain(teamOwner).mountTeamRecovery(teamOwner, holder);
+        synchronized (this) {
+            if (root == null || holder == null) return false;
+            Object mounted = teamRecoveryMounts.get(teamOwner);
+            if (mounted != null && mounted != holder) return false;
+            teamRecoveryMounts.put(teamOwner, holder);
+            return true;
+        }
+    }
+
+    public void unmountTeamRecovery(UUID teamOwner, Object holder) {
+        if (parent == null) {
+            CloudworksPlayerDataManager domain = domains.get(teamOwner);
+            if (domain != null) domain.unmountTeamRecovery(teamOwner, holder);
+            return;
+        }
+        synchronized (this) {
+            teamRecoveryMounts.remove(teamOwner, holder);
+        }
+    }
+
+    /**
+     * Loads the persisted recovery buffer into {@code buffer} and replays any journal.
+     */
+    public void loadTeamRecoveryBuffer(UUID teamOwner, CloudworksInventory buffer) {
+        if (parent == null) {
+            domain(teamOwner).loadTeamRecoveryBuffer(teamOwner, buffer);
+            return;
+        }
+        synchronized (this) {
+            if (root == null) return;
+            // Hydrate every source projection before the drain or completion probes inspect caches.
+            getOrCreate(teamOwner);
+            Path file = recoveryBufferFile(teamOwner);
+            if (Files.exists(file)) {
+                NBTTagCompound tag = read(file);
+                NBTTagList entries = tag.getTagList("contents", 10);
+                boolean hasLastBatch = tag.hasKey("lastBatch", 4);
+                boolean invalidLedger = tag.getBoolean("lastBatchInvalid")
+                        || !hasLastBatch && !entries.isEmpty();
+                if (invalidLedger) {
+                    recoveryLedgerInvalid.add(teamOwner);
+                    if (Mekanism.logger != null)
+                        Mekanism.logger.warn(
+                                "Cloudworks recovery buffer {} has contents but no trustworthy lastBatch; journal replay is blocked",
+                                file);
+                } else {
+                    recoveryLedgerInvalid.remove(teamOwner);
+                    teamRecoveryBatches.put(teamOwner, hasLastBatch ? tag.getLong("lastBatch") : 0L);
+                }
+                for (int i = 0; i < entries.tagCount(); i++) {
+                    NBTTagCompound entry = entries.getCompoundTagAt(i);
+                    buffer.insertIgnoringTypeCap(
+                            QIOResourceDescriptor.read(entry.getCompoundTag("descriptor")),
+                            entry.getLong("amount"));
+                }
+            }
+            replayTeamRecoveryJournal(teamOwner, buffer);
+        }
+    }
+
+    /**
+     * Persists the buffer file; the batch counter stays under PDM control.
+     */
+    public boolean saveTeamRecoveryBuffer(UUID teamOwner, CloudworksInventory buffer) {
+        if (parent == null) {
+            return domain(teamOwner).saveTeamRecoveryBuffer(teamOwner, buffer);
+        }
+        synchronized (this) {
+            if (root == null || !drainInteraction()) return false;
+            NBTTagCompound tag = new NBTTagCompound();
+            tag.setInteger("schema", 1);
+            if (recoveryLedgerInvalid.contains(teamOwner))
+                tag.setBoolean("lastBatchInvalid", true);
+            else
+                tag.setLong("lastBatch", recoveryLastBatch(teamOwner));
+            tag.setTag("contents", buffer.write().getTagList("contents", 10));
+            // Recovery payload is a transaction boundary: do not acknowledge a take or
+            // retire its journal until this replacement has reached disk.
+            write(recoveryBufferFile(teamOwner), tag);
+            return true;
+        }
+    }
+
+    public String teamRecoveryStatus(UUID teamOwner) {
+        if (parent == null) return domain(teamOwner).teamRecoveryStatus(teamOwner);
+        synchronized (teamRecoveryLock) {
+            TeamRecoveryRecord record = findTeamRecovery(teamOwner);
+            return record == null ? "" : record.status;
+        }
+    }
+
+    /**
+     * True when every materializable estate piece is empty (energy handled separately).
+     */
+    public boolean teamRecoveryEstateDrained(UUID teamOwner) {
+        if (parent == null) return domain(teamOwner).teamRecoveryEstateDrained(teamOwner);
+        synchronized (this) {
+            if (root == null || findTeamRecovery(teamOwner) == null) return true;
+            getOrCreate(teamOwner);
+            CloudworksData cloud = clouds.get(teamOwner);
+            if (cloud != null) {
+                for (CloudworksInventory warehouse : new CloudworksInventory[]{
+                        cloud.receiving(), cloud.transfer(), cloud.sending()})
+                    if (!warehouse.snapshot().isEmpty()) return false;
+                if (cloud.upgradePool(true) > 0 || cloud.upgradePool(false) > 0) return false;
+                for (ResourceLocation type : cloud.customUpgradePool().ids()) {
+                    MachineModuleType upgrade =
+                            CloudworksMachineModuleRegistry.type(type);
+                    if (upgrade != null && upgrade.item() != null && !upgrade.item().isEmpty()) return false;
+                    // Unresolvable custom items cannot materialize; they transfer as
+                    // counts during the energy phase instead of blocking the drain.
+                }
+            }
+            if (!recycleBin(teamOwner).entries().isEmpty()) return false;
+            if (machineCache(teamOwner).typeCount() > 0) return false;
+            if (!specialNodeStore(teamOwner).load().resources.isEmpty()) return false;
+            for (ProductionLineData line : lines(teamOwner)) {
+                for (MachineNodeData node : line.machines())
+                    for (List<CloudworksResourceStack> bufferList : Arrays.asList(node.inputs(), node.outputs(), node.templates()))
+                        if (!bufferList.isEmpty()) return false;
+                for (CloudworksChannelNode channel : line.channels())
+                    if (!channel.buffer().snapshot().isEmpty()) return false;
+            }
+            return portRecordsDrained(teamOwner);
+        }
+    }
+
+    private boolean portRecordsDrained(UUID teamOwner) {
+        // The in-memory records are fresher than the asynchronous orderedWrite queue:
+        // a record already cleared in memory wins over its stale disk image.
+        Set<UUID> clearedInMemory = new HashSet<>();
+        synchronized (this) {
+            for (CloudworksPortRecord port : ports.values())
+                if (teamOwner.equals(port.owner)) {
+                    if (!port.resources().isEmpty()) return false;
+                    clearedInMemory.add(port.id);
+                }
+        }
+        Path directory = ownerDirectory(teamOwner).resolve("ports");
+        if (Files.isDirectory(directory)) {
+            try (DirectoryStream<Path> files = Files.newDirectoryStream(directory, "*.dat")) {
+                for (Path file : files) {
+                    CloudworksPortRecord port = CloudworksPortRecord.read(read(file));
+                    if (teamOwner.equals(port.owner) && !clearedInMemory.contains(port.id)
+                            && !port.resources().isEmpty()) return false;
+                }
+            } catch (IOException failure) {
+                throw dataError(failure);
+            }
+        }
+        return true;
+    }
+
+    /**
+     * One bounded drain step. Journal-first: deltas are logged, sources are reduced and
+     * persisted, the buffer file is rewritten with the new batch id, then the journal is
+     * deleted. Returns true when anything moved.
+     */
+    public boolean drainTeamRecoveryBatch(UUID teamOwner, UUID recipient,
+                                          CloudworksInventory buffer, int maxTypes) {
+        if (parent == null) return domain(teamOwner).drainTeamRecoveryBatch(teamOwner, recipient, buffer, maxTypes);
+        Objects.requireNonNull(recipient);
+        synchronized (this) {
+            requireLoaded();
+            TeamRecoveryRecord record = findTeamRecovery(teamOwner);
+            if (record == null || recipient.equals(teamOwner) || !recipient.equals(record.lastOwner)) return false;
+            if ("DRAINED".equals(record.status)) return false;
+            getOrCreate(teamOwner);
+            if (!replayTeamRecoveryJournal(teamOwner, buffer)) return false;
+            updateTeamRecoveryStatus(teamOwner, "RECOVERING");
+            if (!drainInteraction()) return false;
+            Map<QIOResourceDescriptor, Long> deltas = new LinkedHashMap<>();
+            List<UUID> portIds = new ArrayList<>();
+            String piece = nextDrainPiece(teamOwner, maxTypes, buffer, deltas, portIds);
+            if (piece == null) return false;
+            long batch = Math.addExact(recoveryLastBatch(teamOwner), 1);
+            writeRecoveryJournal(teamOwner, batch, piece, deltas, portIds);
+            Map<QIOResourceDescriptor, Long> consumed = applyRecoveryDeltas(teamOwner, piece, deltas, portIds);
+            if (consumed.isEmpty()) {
+                // Nothing actually moved (source drifted): drop the journal without
+                // touching the buffer so the next batch re-collects fresh state.
+                deleteFile(recoveryJournalFile(teamOwner));
+                return false;
+            }
+            for (Map.Entry<QIOResourceDescriptor, Long> moved : consumed.entrySet())
+                buffer.insertIgnoringTypeCap(moved.getKey(), moved.getValue());
+            teamRecoveryBatches.put(teamOwner, batch);
+            if (!saveTeamRecoveryBuffer(teamOwner, buffer)) return true;
+            deleteFile(recoveryJournalFile(teamOwner));
+            return true;
+        }
+    }
+
+    /**
+     * Chooses the next estate piece and collects its deltas (no mutation yet).
+     */
+    private String nextDrainPiece(UUID teamOwner, int maxTypes, CloudworksInventory buffer,
+                                  Map<QIOResourceDescriptor, Long> deltas, List<UUID> portIds) {
+        // A full descriptor (for example an unlimited water source) must not
+        // keep the machine, card and other resource pieces from being visited.
+        for (String piece : new String[]{"lines", "recycle", "warehouses", "ports", "machines", "upgrades", "specials"}) {
+            deltas.clear();
+            portIds.clear();
+            switch (piece) {
+                case "lines" -> collectLineBuffers(teamOwner, maxTypes, deltas);
+                case "recycle" -> collectRecycleBin(teamOwner, deltas);
+                case "warehouses" -> collectWarehouses(teamOwner, maxTypes, deltas);
+                case "ports" -> collectPortRecords(teamOwner, deltas, portIds);
+                case "machines" -> collectMachineCache(teamOwner, maxTypes, deltas);
+                case "upgrades" -> collectUpgradePools(teamOwner, deltas);
+                case "specials" -> collectSpecialNodes(teamOwner, deltas);
+            }
+            if (limitRecoveryDeltasToBufferRoom(buffer, piece, deltas)) return piece;
+        }
+        return null;
+    }
+
+    private void addDelta(Map<QIOResourceDescriptor, Long> deltas, QIOResourceDescriptor descriptor, long amount) {
+        if (descriptor == null || amount <= 0) return;
+        long current = deltas.getOrDefault(descriptor, 0L);
+        long next = current >= RECOVERY_BUFFER_CAPACITY - amount
+                ? RECOVERY_BUFFER_CAPACITY : current + amount;
+        deltas.put(descriptor, next);
+    }
+
+    private boolean limitRecoveryDeltasToBufferRoom(
+            CloudworksInventory buffer,
+            String piece,
+            Map<QIOResourceDescriptor, Long> deltas) {
+        if (buffer.hasPerResourceCapacity()) {
+            boolean atomic = "recycle".equals(piece) || "ports".equals(piece) || "upgrades".equals(piece);
+            for (Map.Entry<QIOResourceDescriptor, Long> entry : deltas.entrySet()) {
+                long accepted = Math.min(entry.getValue(), buffer.room(entry.getKey()));
+                if (atomic && accepted != entry.getValue()) return false;
+                entry.setValue(accepted);
+            }
+            deltas.entrySet().removeIf(entry -> entry.getValue() <= 0);
+            return !deltas.isEmpty();
+        }
+        long room = buffer.room();
+        if (room <= 0) return false;
+        if ("recycle".equals(piece) || "ports".equals(piece) || "upgrades".equals(piece)) {
+            long total = 0;
+            for (long amount : deltas.values()) {
+                if (amount > room - total) return false;
+                total += amount;
+            }
+            return !deltas.isEmpty();
+        }
+        for (Map.Entry<QIOResourceDescriptor, Long> entry : deltas.entrySet()) {
+            long accepted = Math.min(entry.getValue(), room);
+            entry.setValue(accepted);
+            room -= accepted;
+        }
+        deltas.entrySet().removeIf(entry -> entry.getValue() <= 0);
+        return !deltas.isEmpty();
+    }
+
+    private void mergeRecoveryAmount(Map<QIOResourceDescriptor, Long> values,
+                                     QIOResourceDescriptor descriptor, long amount) {
+        if (descriptor == null || amount <= 0) return;
+        long current = values.getOrDefault(descriptor, 0L);
+        long next = current >= RECOVERY_BUFFER_CAPACITY - amount
+                ? RECOVERY_BUFFER_CAPACITY : current + amount;
+        values.put(descriptor, next);
+    }
+
+    private boolean collectLineBuffers(UUID teamOwner, int maxTypes, Map<QIOResourceDescriptor, Long> deltas) {
+        for (ProductionLineData line : lines(teamOwner)) {
+            for (MachineNodeData node : line.machines())
+                for (List<CloudworksResourceStack> bufferList : Arrays.asList(node.inputs(), node.outputs(), node.templates()))
+                    for (CloudworksResourceStack resource : bufferList) {
+                        if (deltas.size() >= maxTypes) return !deltas.isEmpty();
+                        addDelta(deltas, resource.descriptor(), resource.amount());
+                    }
+            for (CloudworksChannelNode channel : line.channels())
+                for (Map.Entry<QIOResourceDescriptor, Long> resource : channel.buffer().snapshot().entrySet()) {
+                    if (deltas.size() >= maxTypes) return !deltas.isEmpty();
+                    addDelta(deltas, resource.getKey(), resource.getValue());
+                }
+        }
+        return !deltas.isEmpty();
+    }
+
+    private boolean collectRecycleBin(UUID teamOwner, Map<QIOResourceDescriptor, Long> deltas) {
+        for (Map.Entry<QIOResourceDescriptor, Long> resource : recycleBin(teamOwner).entries().entrySet())
+            addDelta(deltas, resource.getKey(), resource.getValue());
+        return !deltas.isEmpty();
+    }
+
+    private boolean collectWarehouses(UUID teamOwner, int maxTypes, Map<QIOResourceDescriptor, Long> deltas) {
+        CloudworksData cloud = clouds.get(teamOwner);
+        if (cloud == null) return false;
+        for (CloudworksInventory warehouse : new CloudworksInventory[]{
+                cloud.receiving(), cloud.transfer(), cloud.sending()}) {
+            for (Map.Entry<QIOResourceDescriptor, Long> resource : warehouse.snapshot().entrySet()) {
+                if (deltas.size() >= maxTypes) return true;
+                addDelta(deltas, resource.getKey(), resource.getValue());
+            }
+            if (deltas.size() >= maxTypes) return true;
+        }
+        return !deltas.isEmpty();
+    }
+
+    private boolean collectPortRecords(UUID teamOwner, Map<QIOResourceDescriptor, Long> deltas, List<UUID> portIds) {
+        Path directory = ownerDirectory(teamOwner).resolve("ports");
+        Map<UUID, CloudworksPortRecord> records = new LinkedHashMap<>();
+        if (Files.isDirectory(directory)) {
+            try (DirectoryStream<Path> files = Files.newDirectoryStream(directory, "*.dat")) {
+                for (Path file : files) {
+                    CloudworksPortRecord port = CloudworksPortRecord.read(read(file));
+                    if (teamOwner.equals(port.owner)) records.put(port.id, port);
+                }
+            } catch (IOException failure) {
+                throw dataError(failure);
+            }
+        }
+        synchronized (this) {
+            for (CloudworksPortRecord port : ports.values())
+                if (teamOwner.equals(port.owner)) records.put(port.id, port);
+        }
+        // Port records are immutable snapshots, so one record is drained atomically
+        // per batch (budget-immune); the journal carries its id.
+        for (CloudworksPortRecord port : records.values()) {
+            if (port.resources().isEmpty()) continue;
+            portIds.add(port.id);
+            for (Map.Entry<QIOResourceDescriptor, Long> resource : port.resources().entrySet())
+                addDelta(deltas, resource.getKey(), resource.getValue());
+            return true;
+        }
+        return false;
+    }
+
+    private boolean collectMachineCache(UUID teamOwner, int maxTypes, Map<QIOResourceDescriptor, Long> deltas) {
+        CloudworksMachineCache cache = machineCache(teamOwner);
+        for (CloudworksMachineCache.Entry entry : cache.entries()) {
+            if (deltas.size() >= maxTypes) return true;
+            for (CloudworksMachineCache.Variant variant : entry.variants()) {
+                ItemStack stack = entry.template().copy();
+                NBTTagCompound variantTag = variant.tag();
+                stack.setTagCompound(variantTag.getKeySet().isEmpty() ? null : variantTag.copy());
+                addDelta(deltas, QIOResourceCodecs.item(stack), variant.count());
+            }
+        }
+        return !deltas.isEmpty();
+    }
+
+    private boolean collectUpgradePools(UUID teamOwner, Map<QIOResourceDescriptor, Long> deltas) {
+        CloudworksData cloud = clouds.get(teamOwner);
+        if (cloud == null) return false;
+        // Lazy materialization: touching the native upgrade item stacks class-loads
+        // Mekanism upgrade items (and their Baubles interfaces) — only build the
+        // descriptor when there is actually something to drain.
+        for (ProductionLineData line : lines(teamOwner)) {
+            if (line.speedUpgrades() > 0)
+                addDelta(deltas, upgradeItemDescriptor(Upgrade.SPEED), line.speedUpgrades());
+            if (line.energyUpgrades() > 0)
+                addDelta(deltas, upgradeItemDescriptor(Upgrade.ENERGY), line.energyUpgrades());
+        }
+        if (cloud.upgradePool(true) > 0)
+            addDelta(deltas, upgradeItemDescriptor(Upgrade.SPEED), cloud.upgradePool(true));
+        if (cloud.upgradePool(false) > 0)
+            addDelta(deltas, upgradeItemDescriptor(Upgrade.ENERGY), cloud.upgradePool(false));
+        for (ResourceLocation type : cloud.customUpgradePool().ids()) {
+            MachineModuleType upgrade =
+                    CloudworksMachineModuleRegistry.type(type);
+            if (upgrade != null && upgrade.item() != null && !upgrade.item().isEmpty())
+                addDelta(deltas, QIOResourceCodecs.item(upgrade.item()),
+                        cloud.customUpgradePool().count(type));
+        }
+        return !deltas.isEmpty();
+    }
+
+    private QIOResourceDescriptor upgradeItemDescriptor(Upgrade type) {
+        ItemStack stack = CloudworksUpgradeItems.currentStack(type);
+        return stack == null || stack.isEmpty() ? null
+                : QIOResourceCodecs.item(stack);
+    }
+
+    private QIOResourceDescriptor recoveryCardDescriptor(CloudworksSpecialNodeStore.Entry entry) {
+        ItemStack card = CloudworksInfiniteResourceCardData.fromEntry(entry)
+                .toItemStack(CloudworksItems.InfiniteResourceCard);
+        return QIOResourceCodecs.item(card);
+    }
+
+    private boolean collectSpecialNodes(UUID teamOwner, Map<QIOResourceDescriptor, Long> deltas) {
+        for (CloudworksSpecialNodeStore.Entry entry : specialNodeStore(teamOwner).load().resources.values())
+            addDelta(deltas, recoveryCardDescriptor(entry), 1);
+        return !deltas.isEmpty();
+    }
+
+    /**
+     * Applies already-journaled deltas: mutates the estate piece, persists it, and
+     * returns what was actually consumed — the buffer only ever receives that.
+     */
+    private Map<QIOResourceDescriptor, Long> applyRecoveryDeltas(UUID teamOwner, String piece,
+                                                                 Map<QIOResourceDescriptor, Long> deltas, List<UUID> portIds) {
+        Map<QIOResourceDescriptor, Long> consumed = new LinkedHashMap<>();
+        switch (piece) {
+            case "lines" -> {
+                Map<QIOResourceDescriptor, Long> remaining = new LinkedHashMap<>(deltas);
+                for (ProductionLineData line : lines(teamOwner)) {
+                    boolean touched = false;
+                    for (MachineNodeData node : line.machines())
+                        for (List<CloudworksResourceStack> bufferList : Arrays.asList(node.inputs(), node.outputs(), node.templates())) {
+                            touched |= consumeStackList(bufferList, remaining, consumed);
+                            bufferList.removeIf(stack -> stack.amount() <= 0);
+                        }
+                    for (CloudworksChannelNode channel : line.channels())
+                        for (Map.Entry<QIOResourceDescriptor, Long> delta : remaining.entrySet()) {
+                            if (delta.getValue() <= 0) continue;
+                            long taken = channel.buffer().extract(delta.getKey(), delta.getValue());
+                            if (taken > 0) {
+                                delta.setValue(delta.getValue() - taken);
+                                mergeRecoveryAmount(consumed, delta.getKey(), taken);
+                                touched = true;
+                            }
+                        }
+                    if (touched) writeCheckpoint(line);
+                }
+            }
+            case "recycle" -> {
+                CloudworksRecycleBin bin = recycleBin(teamOwner);
+                for (Map.Entry<QIOResourceDescriptor, Long> drained : bin.drain().entrySet())
+                    if (drained.getValue() > 0) consumed.put(drained.getKey(), drained.getValue());
+                bin.clear();
+                persistRecycleBin(teamOwner, bin);
+            }
+            case "warehouses" -> {
+                CloudworksData cloud = getOrCreate(teamOwner);
+                Map<QIOResourceDescriptor, Long> remaining = new LinkedHashMap<>(deltas);
+                boolean receiving = false, transfer = false, sending = false;
+                for (Map.Entry<QIOResourceDescriptor, Long> delta : remaining.entrySet()) {
+                    if (delta.getValue() <= 0) continue;
+                    long taken = cloud.receiving().extract(delta.getKey(), delta.getValue());
+                    if (taken > 0) {
+                        delta.setValue(delta.getValue() - taken);
+                        mergeRecoveryAmount(consumed, delta.getKey(), taken);
+                        receiving = true;
+                    }
+                    if (delta.getValue() <= 0) continue;
+                    taken = cloud.transfer().extract(delta.getKey(), delta.getValue());
+                    if (taken > 0) {
+                        delta.setValue(delta.getValue() - taken);
+                        mergeRecoveryAmount(consumed, delta.getKey(), taken);
+                        transfer = true;
+                    }
+                    if (delta.getValue() <= 0) continue;
+                    taken = cloud.sending().extract(delta.getKey(), delta.getValue());
+                    if (taken > 0) {
+                        delta.setValue(delta.getValue() - taken);
+                        mergeRecoveryAmount(consumed, delta.getKey(), taken);
+                        sending = true;
+                    }
+                }
+                if (receiving) orderedWrite(teamOwner, receivingFile(teamOwner), cloud.writeReceiving());
+                if (transfer) orderedWrite(teamOwner, transferStoreFile(teamOwner), cloud.writeTransfer());
+                if (sending) orderedWrite(teamOwner, sendingFile(teamOwner), cloud.writeSending());
+            }
+            case "ports" -> {
+                // Records may live only in memory yet (orderedWrite drains
+                // asynchronously), so resolve each journaled id from disk ∪ memory.
+                Path directory = ownerDirectory(teamOwner).resolve("ports");
+                Map<UUID, CloudworksPortRecord> records = new LinkedHashMap<>();
+                if (Files.isDirectory(directory)) {
+                    try (DirectoryStream<Path> files = Files.newDirectoryStream(directory, "*.dat")) {
+                        for (Path file : files) {
+                            CloudworksPortRecord port = CloudworksPortRecord.read(read(file));
+                            if (teamOwner.equals(port.owner)) records.put(port.id, port);
+                        }
+                    } catch (IOException failure) {
+                        throw dataError(failure);
+                    }
+                }
+                synchronized (this) {
+                    for (CloudworksPortRecord port : ports.values())
+                        if (teamOwner.equals(port.owner)) records.put(port.id, port);
+                }
+                for (UUID portId : portIds) {
+                    CloudworksPortRecord record = records.get(portId);
+                    if (record == null) continue;
+                    for (Map.Entry<QIOResourceDescriptor, Long> resource : record.resources().entrySet())
+                        mergeRecoveryAmount(consumed, resource.getKey(), resource.getValue());
+                    NBTTagCompound tag = record.write();
+                    tag.setTag("items", new NBTTagList());
+                    tag.setTag("fluids", new NBTTagList());
+                    tag.setTag("gases", new NBTTagList());
+                    orderedWrite(teamOwner, directory.resolve(portId + ".dat"), tag);
+                    // Never read the file back — refresh the in-memory record from
+                    // the cleared tag itself.
+                    synchronized (this) {
+                        if (ports.containsKey(portId)) ports.put(portId, CloudworksPortRecord.read(tag));
+                    }
+                }
+            }
+            case "machines" -> {
+                CloudworksMachineCache cache = machineCache(teamOwner);
+                Map<QIOResourceDescriptor, Long> remaining = new LinkedHashMap<>(deltas);
+                for (CloudworksMachineCache.Entry entry : cache.entries()) {
+                    for (CloudworksMachineCache.Variant variant : entry.variants()) {
+                        ItemStack stack = entry.template().copy();
+                        NBTTagCompound variantTag = variant.tag();
+                        stack.setTagCompound(variantTag.getKeySet().isEmpty() ? null : variantTag.copy());
+                        QIOResourceDescriptor descriptor = QIOResourceCodecs.item(stack);
+                        long quota = remaining.getOrDefault(descriptor, 0L);
+                        long taken = cache.extractVariant(stack, quota);
+                        if (taken > 0) {
+                            remaining.put(descriptor, quota - taken);
+                            mergeRecoveryAmount(consumed, descriptor, taken);
+                        }
+                    }
+                }
+                persistMachineCache(teamOwner, cache);
+            }
+            case "upgrades" -> {
+                // Wholesale for lines/native pools (collect always covers them whole);
+                // custom types subtract individually so unresolvable items are preserved.
+                CloudworksData cloud = getOrCreate(teamOwner);
+                QIOResourceDescriptor speed = upgradeItemDescriptor(Upgrade.SPEED);
+                QIOResourceDescriptor energy = upgradeItemDescriptor(Upgrade.ENERGY);
+                if (speed != null && deltas.containsKey(speed)) {
+                    long lineSpeed = 0;
+                    for (ProductionLineData line : lines(teamOwner)) {
+                        lineSpeed += line.speedUpgrades();
+                        line.setUpgrades(0, line.energyUpgrades());
+                        writeCheckpoint(line);
+                    }
+                    long poolSpeed = cloud.upgradePool(true);
+                    cloud.addUpgradePool(true, -(int) Math.min(Integer.MAX_VALUE, poolSpeed));
+                    mergeRecoveryAmount(consumed, speed, lineSpeed + poolSpeed);
+                }
+                if (energy != null && deltas.containsKey(energy)) {
+                    long lineEnergy = 0;
+                    for (ProductionLineData line : lines(teamOwner)) {
+                        lineEnergy += line.energyUpgrades();
+                        line.setUpgrades(line.speedUpgrades(), 0);
+                        writeCheckpoint(line);
+                    }
+                    long poolEnergy = cloud.upgradePool(false);
+                    cloud.addUpgradePool(false, -(int) Math.min(Integer.MAX_VALUE, poolEnergy));
+                    mergeRecoveryAmount(consumed, energy, lineEnergy + poolEnergy);
+                }
+                for (ResourceLocation type : cloud.customUpgradePool().ids()) {
+                    MachineModuleType upgrade =
+                            CloudworksMachineModuleRegistry.type(type);
+                    if (upgrade != null && upgrade.item() != null && !upgrade.item().isEmpty()) {
+                        QIOResourceDescriptor descriptor = QIOResourceCodecs.item(upgrade.item());
+                        if (deltas.containsKey(descriptor)) {
+                            long count = cloud.customUpgradePool().count(type);
+                            cloud.customUpgradePool().add(type, -count);
+                            mergeRecoveryAmount(consumed, descriptor, count);
+                        }
+                    }
+                }
+                persistCloudCore(teamOwner, cloud);
+            }
+            case "specials" -> {
+                CloudworksSpecialNodeStore store = specialNodeStore(teamOwner);
+                CloudworksSpecialNodeStore.Snapshot snapshot = store.load();
+                CloudworksSpecialNodeStore.Snapshot next = CloudworksSpecialNodeStore.Snapshot.empty();
+                for (CloudworksSpecialNodeStore.Entry entry : snapshot.resources.values()) {
+                    QIOResourceDescriptor cardDescriptor = recoveryCardDescriptor(entry);
+                    if (!deltas.containsKey(cardDescriptor))
+                        next = next.add(CloudworksInfiniteResourceCardData.fromEntry(entry)).next;
+                    else mergeRecoveryAmount(consumed, cardDescriptor, 1L);
+                }
+                store.publish(next);
+                orderedWrite(teamOwner, specialNodeDirectory(teamOwner).resolve(CloudworksSpecialNodeStore.NODE_FILE), next.nodesTag());
+                orderedWrite(teamOwner, specialNodeDirectory(teamOwner).resolve(CloudworksSpecialNodeStore.RESOURCE_FILE), next.resourcesTag());
+            }
+            default -> throw error("team_recovery");
+        }
+        return consumed;
+    }
+
+    private boolean consumeStackList(List<CloudworksResourceStack> bufferList, Map<QIOResourceDescriptor, Long> deltas,
+                                     Map<QIOResourceDescriptor, Long> consumed) {
+        boolean touched = false;
+        for (CloudworksResourceStack resource : bufferList) {
+            Long amount = deltas.get(resource.descriptor());
+            if (amount != null && amount > 0 && resource.amount() > 0) {
+                // The dissolved team's lines are disabled — stale reservations are
+                // force-released so the estate drains completely.
+                if (resource.reserved() > 0) resource.release(resource.reserved());
+                long before = resource.amount();
+                resource.consume(Math.min(amount, before));
+                long taken = before - resource.amount();
+                deltas.put(resource.descriptor(), amount - taken);
+                mergeRecoveryAmount(consumed, resource.descriptor(), taken);
+                touched = true;
+            }
+        }
+        return touched;
+    }
+
+    private void writeRecoveryJournal(UUID teamOwner, long batch, String piece,
+                                      Map<QIOResourceDescriptor, Long> deltas, List<UUID> portIds) {
+        NBTTagCompound tag = new NBTTagCompound();
+        tag.setInteger("schema", 1);
+        tag.setLong("batch", batch);
+        tag.setString("piece", piece);
+        if (portIds != null && !portIds.isEmpty()) {
+            NBTTagList ids = new NBTTagList();
+            for (UUID portId : portIds) ids.appendTag(new NBTTagString(portId.toString()));
+            tag.setTag("portIds", ids);
+        }
+        NBTTagList entries = new NBTTagList();
+        for (Map.Entry<QIOResourceDescriptor, Long> delta : deltas.entrySet()) {
+            NBTTagCompound entry = new NBTTagCompound();
+            entry.setTag("descriptor", delta.getKey().write());
+            entry.setLong("amount", delta.getValue());
+            entries.appendTag(entry);
+        }
+        tag.setTag("deltas", entries);
+        write(recoveryJournalFile(teamOwner), tag);
+    }
+
+    /**
+     * Idempotent journal replay: the buffer merges by batch id; source consumption only
+     * takes what the estate still holds.
+     */
+    private boolean replayTeamRecoveryJournal(UUID teamOwner, CloudworksInventory buffer) {
+        Path file = recoveryJournalFile(teamOwner);
+        if (!Files.exists(file)) return true;
+        if (recoveryLedgerInvalid.contains(teamOwner)) return false;
+        NBTTagCompound tag = read(file);
+        long batch = tag.getLong("batch");
+        String piece = tag.getString("piece");
+        List<UUID> portIds = new ArrayList<>();
+        NBTTagList ids = tag.getTagList("portIds", 8);
+        for (int i = 0; i < ids.tagCount(); i++) portIds.add(UUID.fromString(ids.getStringTagAt(i)));
+        NBTTagList entries = tag.getTagList("deltas", 10);
+        Map<QIOResourceDescriptor, Long> deltas = new LinkedHashMap<>();
+        for (int i = 0; i < entries.tagCount(); i++) {
+            NBTTagCompound entry = entries.getCompoundTagAt(i);
+            deltas.put(QIOResourceDescriptor.read(entry.getCompoundTag("descriptor")),
+                    entry.getLong("amount"));
+        }
+        if (deltas.isEmpty()) {
+            deleteFile(file);
+            return true;
+        }
+        boolean alreadyApplied = recoveryLastBatch(teamOwner) == batch;
+        if (!alreadyApplied) {
+            long sharedRoom = buffer.room();
+            for (Map.Entry<QIOResourceDescriptor, Long> delta : deltas.entrySet()) {
+                long room = buffer.hasPerResourceCapacity() ? buffer.room(delta.getKey()) : sharedRoom;
+                if (delta.getValue() > room) {
+                    if (Mekanism.logger != null)
+                        Mekanism.logger.warn(
+                                "Cloudworks recovery journal batch {} cannot fit buffer for {} (needed {}, room {})",
+                                batch, teamOwner, delta.getValue(), room);
+                    return false;
+                }
+                if (!buffer.hasPerResourceCapacity()) sharedRoom -= delta.getValue();
+            }
+            for (Map.Entry<QIOResourceDescriptor, Long> delta : deltas.entrySet())
+                buffer.insertIgnoringTypeCap(delta.getKey(), delta.getValue());
+            teamRecoveryBatches.put(teamOwner, batch);
+        }
+        Map<QIOResourceDescriptor, Long> stillPresent = new LinkedHashMap<>();
+        collectPresent(teamOwner, piece, deltas, stillPresent);
+        applyRecoveryDeltas(teamOwner, piece, stillPresent, portIds);
+        if (!saveTeamRecoveryBuffer(teamOwner, buffer)) return false;
+        deleteFile(file);
+        return true;
+    }
+
+    /**
+     * Re-collects which journaled deltas the estate still holds (post-crash partial states).
+     */
+    private void collectPresent(UUID teamOwner, String piece, Map<QIOResourceDescriptor, Long> deltas,
+                                Map<QIOResourceDescriptor, Long> present) {
+        Map<QIOResourceDescriptor, Long> probe = new LinkedHashMap<>();
+        switch (piece) {
+            case "lines" -> collectLineBuffers(teamOwner, Integer.MAX_VALUE, probe);
+            case "recycle" -> collectRecycleBin(teamOwner, probe);
+            case "warehouses" -> collectWarehouses(teamOwner, Integer.MAX_VALUE, probe);
+            // Port record clearing is idempotent per journaled id — no probe needed.
+            case "ports" -> present.putAll(deltas);
+            case "machines" -> collectMachineCache(teamOwner, Integer.MAX_VALUE, probe);
+            case "upgrades" -> collectUpgradePools(teamOwner, probe);
+            case "specials" -> collectSpecialNodes(teamOwner, probe);
+            default -> {
+            }
+        }
+        if (piece.equals("ports")) return;
+        for (Map.Entry<QIOResourceDescriptor, Long> delta : deltas.entrySet()) {
+            long held = probe.getOrDefault(delta.getKey(), 0L);
+            if (held >= delta.getValue()) present.put(delta.getKey(), delta.getValue());
+            else if (held > 0) present.put(delta.getKey(), held);
+        }
+    }
+
+    /**
+     * Returns the amount of energy still held by the dissolved estate. The
+     * recovery block owns the destination battery; this method never touches
+     * the recipient cloud.
+     */
+    public double teamRecoveryEnergyRemaining(UUID teamOwner) {
+        if (parent == null) return domain(teamOwner).teamRecoveryEnergyRemaining(teamOwner);
+        synchronized (this) {
+            if (root == null || findTeamRecovery(teamOwner) == null) return 0D;
+            CloudworksData source = getOrCreate(teamOwner);
+            double total = 0D;
+            for (CloudworksPortRecord port : recoveryPortRecords(teamOwner).values())
+                total = addEnergy(total, port.energy());
+            total = addEnergy(total, source.receivingEnergy());
+            total = addEnergy(total, source.sendingEnergy());
+            total = addEnergy(total, source.energy());
+            for (ProductionLineData line : lines(teamOwner))
+                total = addEnergy(total, line.energy());
+            return total;
+        }
+    }
+
+    /**
+     * Pulls energy from the estate into the recovery block's battery. Sources
+     * are consumed in a stable order and persisted as part of the same tick.
+     */
+    public double pullTeamRecoveryEnergy(UUID teamOwner, double room) {
+        if (parent == null) return domain(teamOwner).pullTeamRecoveryEnergy(teamOwner, room);
+        if (!Double.isFinite(room) || room <= 0D) return 0D;
+        synchronized (this) {
+            requireLoaded();
+            TeamRecoveryRecord record = findTeamRecovery(teamOwner);
+            if (record == null || "DRAINED".equals(record.status) || !drainInteraction()) return 0D;
+            CloudworksData source = getOrCreate(teamOwner);
+            double remaining = room, moved = 0D;
+            Path directory = ownerDirectory(teamOwner).resolve("ports");
+            for (Map.Entry<UUID, CloudworksPortRecord> entry : recoveryPortRecords(teamOwner).entrySet()) {
+                if (remaining <= 0D) break;
+                CloudworksPortRecord port = entry.getValue();
+                double taken = Math.min(remaining, port.energy());
+                if (taken <= 0D) continue;
+                CloudworksPortRecord cleared = withPortEnergy(port, port.energy() - taken);
+                ports.put(entry.getKey(), cleared);
+                // Recovery is the sole writer for this detached record now;
+                // commit it immediately so the cleanup sweep cannot race a
+                // queued port projection and recreate the team directory.
+                write(directory.resolve(entry.getKey() + ".dat"), cleared.write());
+                remaining -= taken;
+                moved += taken;
+            }
+            // Transfer is a resource-only warehouse in the current model; the
+            // only warehouse energy pools are the receiving and sending relays.
+            if (remaining > 0D && (source.receivingEnergy() > 0D || source.sendingEnergy() > 0D)) {
+                double receiving = source.receivingEnergy();
+                double sending = source.sendingEnergy();
+                double taken = Math.min(remaining, receiving);
+                receiving -= taken;
+                remaining -= taken;
+                moved += taken;
+                if (remaining > 0D) {
+                    taken = Math.min(remaining, sending);
+                    sending -= taken;
+                    remaining -= taken;
+                    moved += taken;
+                }
+                source.setWarehouseEnergy(receiving, sending);
+                persistCloudCore(teamOwner, source);
+            }
+            if (remaining > 0D && source.energy() > 0D) {
+                double taken = Math.min(remaining, source.energy());
+                source.setEnergy(source.energy() - taken, source.maxEnergy(), source.unlimitedEnergy());
+                remaining -= taken;
+                moved += taken;
+                persistCloudCore(teamOwner, source);
+            }
+            if (remaining > 0D) {
+                for (ProductionLineData line : lines(teamOwner)) {
+                    if (remaining <= 0D || line.energy() <= 0D) continue;
+                    double taken = Math.min(remaining, line.energy());
+                    line.setEnergy(line.energy() - taken, line.maxEnergy());
+                    remaining -= taken;
+                    moved += taken;
+                    writeCheckpoint(line);
+                }
+            }
+            return moved;
+        }
+    }
+
+    private double addEnergy(double current, double amount) {
+        if (!Double.isFinite(amount) || amount <= 0D) return current;
+        return current >= Double.MAX_VALUE - amount ? Double.MAX_VALUE : current + amount;
+    }
+
+    private CloudworksPortRecord withPortEnergy(CloudworksPortRecord port, double energy) {
+        NBTTagCompound tag = port.write();
+        tag.setDouble("energy", Math.max(0D, energy));
+        return CloudworksPortRecord.read(tag);
+    }
+
+    private Map<UUID, CloudworksPortRecord> recoveryPortRecords(UUID teamOwner) {
+        Path directory = ownerDirectory(teamOwner).resolve("ports");
+        Map<UUID, CloudworksPortRecord> records = new LinkedHashMap<>();
+        if (Files.isDirectory(directory)) {
+            try (DirectoryStream<Path> files = Files.newDirectoryStream(directory, "*.dat")) {
+                for (Path file : files) {
+                    CloudworksPortRecord port = CloudworksPortRecord.read(read(file));
+                    if (teamOwner.equals(port.owner)) records.put(port.id, port);
+                }
+            } catch (IOException failure) {
+                throw dataError(failure);
+            }
+        }
+        for (CloudworksPortRecord port : ports.values())
+            if (teamOwner.equals(port.owner)) records.put(port.id, port);
+        return records;
+    }
+
+    /**
+     * Final cleanup after the buffer is empty and energies are merged.
+     */
+    public void finishTeamRecovery(UUID teamOwner, UUID recipient) {
+        if (parent == null) {
+            CloudworksPlayerDataManager team = domain(teamOwner);
+            CloudworksPlayerDataManager target = domain(recipient);
+            CloudworksPlayerDataManager first = teamOwner.toString().compareTo(recipient.toString()) <= 0 ? team : target;
+            CloudworksPlayerDataManager second = first == team ? target : team;
+            synchronized (first) {
+                synchronized (second) {
+                    team.finishTeamRecovery0(teamOwner, recipient, target);
+                }
+            }
+            return;
+        }
+        synchronized (this) {
+            finishTeamRecovery0(teamOwner, recipient, parent.domain(recipient));
+        }
+    }
+
+    private void finishTeamRecovery0(UUID teamOwner, UUID recipient,
+                                     CloudworksPlayerDataManager targetDomain) {
+        synchronized (this) {
+            requireLoaded();
+            TeamRecoveryRecord record = findTeamRecovery(teamOwner);
+            if (record == null) return;
+            if (record.lastOwner == null || !record.lastOwner.equals(recipient)
+                    || !("RECOVERING".equals(record.status) || "DRAINED".equals(record.status)))
+                throw error("team_recovery");
+            Path bufferFile = recoveryBufferFile(teamOwner);
+            if (Files.exists(recoveryJournalFile(teamOwner))) throw error("busy");
+            if (Files.exists(bufferFile)
+                    && !read(bufferFile).getTagList("contents", 10).isEmpty()) throw error("busy");
+            if (!teamRecoveryEstateDrained(teamOwner) || teamRecoveryEnergyRemaining(teamOwner) > 1.0E-9D)
+                throw error("busy");
+            CloudworksData source = getOrCreate(teamOwner);
+            List<UUID> deleted = new ArrayList<>(source.lineIds());
+            source.lineIds().clear();
+            CloudworksRecycleBin bin = recycleBin(teamOwner);
+            bin.clear();
+            source.addUpgradePool(true, -source.upgradePool(true));
+            source.addUpgradePool(false, -source.upgradePool(false));
+            CloudworksData target = targetDomain.getOrCreate(recipient);
+            boolean targetChanged = false;
+            for (ResourceLocation type : source.customUpgradePool().ids()) {
+                MachineModuleType upgrade =
+                        CloudworksMachineModuleRegistry.type(type);
+                long count = source.customUpgradePool().count(type);
+                if (count > 0 && (upgrade == null || upgrade.item() == null || upgrade.item().isEmpty())) {
+                    target.customUpgradePool().add(type, count);
+                    targetChanged = true;
+                }
+            }
+            source.customUpgradePool().setAll(Collections.emptyMap());
+            source.setEnabled(false);
+            if (targetChanged) targetDomain.persistCloudCore(recipient, target);
+            publish0(teamOwner, source.write(), Collections.emptyList(), bin.write(),
+                    null, null, null, true, false, null, deleted, null);
+            if (!drainInteraction() || !awaitPersistence(10_000)) throw error("busy");
+            updateTeamRecoveryStatus(teamOwner, "DRAINED");
+            retireRecoveredTeam(teamOwner);
+            deleteTeamRecoveryDirectory(teamOwner);
+            removeTeamRecovery(teamOwner);
+            deleteTeamRecoveryIntent(teamOwner);
+            // A queued projection can finish between the first directory
+            // sweep and the recovery-index cleanup. Wait for that final
+            // worker turn and sweep once more so no stale owner directory is
+            // recreated after the recovery block reports completion.
+            if (!awaitPersistence(10_000)) throw error("busy");
+            deleteTeamRecoveryDirectory(teamOwner);
+            teamOwnerIds.remove(teamOwner);
+            teamRecoveryBatches.remove(teamOwner);
+            try {
+                CloudworksTeamManager.recoveryCompleted(teamOwner);
+            } catch (RuntimeException registryUnavailable) {
+                // The team registry may not be loaded (bare environments). The lazy
+                // recoverDissolutions pass on the next team transaction finishes the
+                // team-record cleanup once it observes the owner directory is gone.
+                if (Mekanism.logger != null)
+                    Mekanism.logger.warn("Cloudworks team recovery completion deferred for {}: {}",
+                            teamOwner, registryUnavailable.toString());
+            }
+        }
+    }
+
+    private void deleteFile(Path file) {
+        try {
+            Files.deleteIfExists(file);
+        } catch (IOException failure) {
+            throw dataError(failure);
+        }
+    }
+
     public ProductionLineData createLine(UUID owner) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
@@ -1939,7 +3336,7 @@ public final class CloudworksPlayerDataManager {
         synchronized (this) {
             CloudworksData cloud = requireEnabled(owner);
             if (cloud.lineIds().size() >= Math.min(cloud.unlockedLines(),
-                    mekanism.cloudworks.common.config.CloudworksConfig.settings().maxLines)) throw error("limit");
+                    CloudworksConfig.settings().maxLines)) throw error("limit");
             ProductionLineData line = new ProductionLineData(UUID.randomUUID(), owner);
             line.setExplicitRouting(true);
             writeCheckpoint(line);
@@ -1974,47 +3371,47 @@ public final class CloudworksPlayerDataManager {
             // One durable intent carries the index removal AND the recycle deposit of
             // everything the line held: a process death between the two writes can no
             // longer duplicate the resources. Pre-submit failures roll memory back (P1).
-            mekanism.cloudworks.common.data.CloudworksRecycleBin bin = recycleBin(owner);
+            CloudworksRecycleBin bin = recycleBin(owner);
             NBTTagCompound previousBin = bin.write();
             NBTTagCompound previousLine = line.write();
             CloudworksData cloud = clouds.get(owner);
             int index = cloud.lineIds().indexOf(id);
             if (index < 0) return false;
+            CloudworksData previousCloud = cloud.copyForRuntime();
             try {
                 long discarded = 0;
                 for (MachineNodeData node : line.machines()) {
                     node.cancelOperation();
                     discarded += recycleIntoBin(bin, node.inputs(), node.outputs(), node.templates());
                 }
-                for (CloudworksChannelNode channel : line.channels())
-                    for (Map.Entry<mekanism.api.qio.resource.QIOResourceDescriptor, Long> entry
+                for (CloudworksChannelNode channel : line.channels()) {
+                    if (channel.special()) continue;
+                    for (Map.Entry<QIOResourceDescriptor, Long> entry
                             : channel.buffer().snapshot().entrySet())
                         discarded += bin.deposit(entry.getKey(), entry.getValue());
+                }
                 boolean binChanged = !bin.write().equals(previousBin);
                 cloud.lineIds().remove(index);
                 // 升级层: 删线时已安装升级全部回池（同一意图携带 cloud 投影）
                 returnUpgradesToPool(cloud, line.speedUpgrades(), line.energyUpgrades());
-                try {
-                    CloudworksPendingBlueprint pendingBlueprint = pendingBlueprints.get(owner);
-                    publish0(owner, cloud.write(), Collections.emptyList(), binChanged ? bin.write() : null,
-                            null, null, null, true, false,
-                            pendingBlueprint != null && pendingBlueprint.line.equals(id) ? CloudworksPendingBlueprint.empty() : null,
-                            Collections.singletonList(id));
-                } catch (RuntimeException failure) {
-                    cloud.lineIds().add(index, id);
-                    returnUpgradesToPool(cloud, -line.speedUpgrades(), -line.energyUpgrades());
-                    lines.put(id, ProductionLineData.read(previousLine));
-                    throw failure;
-                }
+                for (ResourceLocation type : line.customUpgradePool().ids())
+                    cloud.customUpgradePool().add(type, line.customUpgradePool().count(type));
+                CloudworksPendingBlueprint pendingBlueprint = pendingBlueprints.get(owner);
+                publish0(owner, cloud.write(), Collections.emptyList(), binChanged ? bin.write() : null,
+                        null, null, null, true, false,
+                        pendingBlueprint != null && pendingBlueprint.line.equals(id) ? CloudworksPendingBlueprint.empty() : null,
+                        Collections.singletonList(id));
                 if (discarded > 0) pendingRecycleOverflow.add(owner);
                 lines.remove(id);
                 if (parent != null) parent.lineDomains.remove(id, this);
                 runtimeUnmaterialized.remove(id);
                 guiLines.remove(id);
+                runtimeLineSnapshots.remove(id);
                 checkpointGenerations.remove(id);
                 return true;
             } catch (RuntimeException failure) {
-                recycleBins.put(owner, mekanism.cloudworks.common.data.CloudworksRecycleBin.read(previousBin));
+                clouds.put(owner, previousCloud);
+                recycleBins.put(owner, CloudworksRecycleBin.read(previousBin));
                 lines.put(id, ProductionLineData.read(previousLine));
                 throw failure;
             }
@@ -2053,7 +3450,8 @@ public final class CloudworksPlayerDataManager {
             if (line == null) return false;
             if (enabled) {
                 CloudworksTopologyValidator.Result validation = CloudworksTopologyValidator.validate(line);
-                if (!validation.valid() || line.machines().isEmpty()) throw error("invalid_line");
+                if (!validation.valid()) throw error(validation.errorKey());
+                if (line.machines().isEmpty()) throw error("invalid_line");
             }
             boolean previous = line.enabled();
             line.setEnabled(enabled);
@@ -2068,25 +3466,52 @@ public final class CloudworksPlayerDataManager {
         }
     }
 
-    /** One-time item unlock; the card is consumed only after the cloud update is durable. */
-    public int unlockOfflineProcessing(UUID owner) {
-        if (parent == null) return domain(owner).unlockOfflineProcessing(owner);
+    /**
+     * Single owner-domain transaction for every numeric expansion and one-time environment unlock.
+     */
+    public CloudworksCardEffect.Result applyCardEffect(UUID owner,
+                                                                                       CloudworksCardEffect effect) {
+        Objects.requireNonNull(owner, "owner");
+        Objects.requireNonNull(effect, "effect");
+        if (parent == null) return domain(owner).applyCardEffect(owner, effect);
         synchronized (this) {
-            CloudworksData cloud = getOrCreate(owner);
-            if (!cloud.enabled()) return -1;
-            if (!mekanism.cloudworks.common.config.CloudworksConfig.settings().offlineProcessingEnabled) return -3;
-            if (cloud.offlineProcessingUnlocked()) return -2;
-            CloudworksData previous = cloud.copyForRuntime();
+            CloudworksData previous = getOrCreate(owner);
+            CloudworksData candidate = previous.copyForRuntime();
+            CloudworksCardEffect.Result result =
+                    effect.apply(candidate, CloudworksConfig.settings());
+            if (!result.applied()) return result;
             try {
-                cloud.setOfflineProcessingUnlocked(true);
-                publishTags(owner, cloud.write(), Collections.emptyList());
+                publishTags(owner, candidate.write(), Collections.emptyList());
                 drainInteraction();
-                return 1;
+                if (recoveryRequired(owner)) throw dataError(recoveryCause(owner));
+                return result;
             } catch (RuntimeException failure) {
                 clouds.put(owner, previous);
                 throw failure;
             }
         }
+    }
+
+    /**
+     * Existing server APIs retain their numeric refusal codes; item use receives the typed result above.
+     */
+    private int legacyCardResult(UUID owner, CloudworksCardEffect effect) {
+        if (parent == null) return domain(owner).legacyCardResult(owner, effect);
+        synchronized (this) {
+            try {
+                requireEnabled(owner);
+            } catch (RuntimeException unavailable) {
+                return -1;
+            }
+            return applyCardEffect(owner, effect).legacyValue();
+        }
+    }
+
+    /**
+     * One-time item unlock; does not enable offline processing on individual lines.
+     */
+    public int unlockOfflineProcessing(UUID owner) {
+        return legacyCardResult(owner, CloudworksCardEffects.OFFLINE);
     }
 
     /**
@@ -2122,7 +3547,7 @@ public final class CloudworksPlayerDataManager {
         synchronized (this) {
             ProductionLineData line = owned(owner, id);
             if (line == null) throw error("not_found");
-            if (enabled && !mekanism.cloudworks.common.config.CloudworksConfig.settings().offlineProcessingEnabled)
+            if (enabled && !CloudworksConfig.settings().offlineProcessingEnabled)
                 throw error("offline_disabled");
             if (enabled && !clouds.get(owner).offlineProcessingUnlocked()) throw error("offline_locked");
             boolean previous = line.runWhileOwnerOffline();
@@ -2138,27 +3563,43 @@ public final class CloudworksPlayerDataManager {
         }
     }
 
-    /** A leased physical terminal. Pending durable projections lock all slot access. */
+    /**
+     * A leased physical terminal. Pending durable projections lock all slot access.
+     */
     public static final class TerminalSession {
         private final UUID owner;
-        private final mekanism.cloudworks.common.content.CloudworksTerminalHost host;
+        private final CloudworksTerminalHost host;
         private CloudworksTerminalState pending;
         private boolean pendingApplied;
         private boolean closed;
-        private TerminalSession(UUID owner, mekanism.cloudworks.common.content.CloudworksTerminalHost host) {
+
+        private TerminalSession(UUID owner, CloudworksTerminalHost host) {
             this.owner = owner;
             this.host = host;
         }
     }
 
     public TerminalSession openTerminal(UUID owner,
-            mekanism.cloudworks.common.content.CloudworksTerminalHost host) {
+                                        CloudworksTerminalHost host) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
+            UUID previousOwner = terminalOwners.get(host.terminalId());
+            if (host.allowsOwnerChange() && previousOwner != null && !previousOwner.equals(owner)) {
+                CloudworksPlayerDataManager previous = domain(previousOwner);
+                CloudworksPlayerDataManager first = previousOwner.toString().compareTo(owner.toString()) < 0 ? previous : target;
+                CloudworksPlayerDataManager second = first == previous ? target : previous;
+                synchronized (first) {
+                    synchronized (second) {
+                        if (previous.terminalSessions.containsKey(host.terminalId()) || !previous.drainInteraction())
+                            throw error("busy");
+                        return target.openTerminal(owner, host);
+                    }
+                }
+            }
             return target.openTerminal(owner, host);
         }
         synchronized (this) {
-            if (host instanceof mekanism.cloudworks.common.tile.TileEntityCloudDashboard dashboard
+            if (host instanceof TileEntityCloudDashboard dashboard
                     && !Objects.equals(owner, dashboard.getSecurity().getOwnerUUID())) throw error("owner");
             requireEnabled(owner);
             if (!host.available()) throw error("busy");
@@ -2170,8 +3611,15 @@ public final class CloudworksPlayerDataManager {
             Path file = terminalFile(host.terminalId());
             if (Files.exists(file)) {
                 CloudworksTerminalState state = CloudworksTerminalState.read(read(file));
-                if (!owner.equals(state.owner())) throw error("owner");
-                if (!state.transferId().equals(host.appliedTerminalTransfer())) session.pending = state;
+                if (!owner.equals(state.owner())) {
+                    if (!host.allowsOwnerChange()) throw error("owner");
+                    if (!state.transferId().equals(host.appliedTerminalTransfer())) {
+                        state.apply(host);
+                        host.persistIdentity();
+                        if (!host.identityDurable()) throw error("busy");
+                    }
+                    terminalPublish(session, CloudworksTerminalState.capture(owner, host), null, null);
+                } else if (!state.transferId().equals(host.appliedTerminalTransfer())) session.pending = state;
             } else {
                 terminalPublish(session, CloudworksTerminalState.capture(owner, host), null, null);
             }
@@ -2182,7 +3630,9 @@ public final class CloudworksPlayerDataManager {
         }
     }
 
-    /** Poll only; server tick never waits for disk. */
+    /**
+     * Poll only; server tick never waits for disk.
+     */
     public boolean terminalReady(TerminalSession session) {
         if (session == null) return false;
         if (parent == null) {
@@ -2192,7 +3642,7 @@ public final class CloudworksPlayerDataManager {
         synchronized (this) {
             if (session == null || session.closed || terminalSessions.get(session.host.terminalId()) != session
                     || !session.host.available() || recoveryRequired(session.owner)) return false;
-            if (session.host instanceof mekanism.cloudworks.common.tile.TileEntityCloudDashboard dashboard
+            if (session.host instanceof TileEntityCloudDashboard dashboard
                     && !session.owner.equals(dashboard.getSecurity().getOwnerUUID())) return false;
             CloudworksData enabledCloud = clouds.get(session.owner);
             if (enabledCloud == null || !enabledCloud.enabled()) return false;
@@ -2245,6 +3695,8 @@ public final class CloudworksPlayerDataManager {
 
     public void processTerminalMachineInput(TerminalSession session) {
         if (session == null) return;
+        if (!CloudworksConfig.settings().terminalItemUploadsEnabled)
+            throw error("terminal_uploads_disabled");
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(session.owner);
             target.processTerminalMachineInput(session);
@@ -2264,6 +3716,8 @@ public final class CloudworksPlayerDataManager {
 
     public void processTerminalEnergyInput(TerminalSession session) {
         if (session == null) return;
+        if (!CloudworksConfig.settings().terminalItemUploadsEnabled)
+            throw error("terminal_uploads_disabled");
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(session.owner);
             target.processTerminalEnergyInput(session);
@@ -2285,6 +3739,8 @@ public final class CloudworksPlayerDataManager {
 
     public void processTerminalUpgradeInput(TerminalSession session) {
         if (session == null) return;
+        if (!CloudworksConfig.settings().terminalItemUploadsEnabled)
+            throw error("terminal_uploads_disabled");
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(session.owner);
             target.processTerminalUpgradeInput(session);
@@ -2294,20 +3750,24 @@ public final class CloudworksPlayerDataManager {
             if (!terminalReady(session)) return;
             CloudworksTerminalState before = CloudworksTerminalState.capture(session.owner, session.host);
             ItemStack upgrades = before.stack(3);
-            if (upgrades.isEmpty() || !(upgrades.getItem() instanceof mekanism.common.base.IUpgradeItem upgradeItem))
-                throw error("upgrade");
-            mekanism.common.Upgrade type = upgradeItem.getUpgradeType(upgrades);
-            if (type != mekanism.common.Upgrade.SPEED && type != mekanism.common.Upgrade.ENERGY)
-                throw error("upgrade");
             CloudworksData cloud = CloudworksData.read(requireEnabled(session.owner).write());
-            cloud.addUpgradePool(type == mekanism.common.Upgrade.SPEED, upgrades.getCount());
+            ResourceLocation customId =
+                    CloudworksMachineModuleRegistry.typeForItem(upgrades);
+            if (customId != null) {
+                // 8.5-B: a registered custom-type item uploads into the custom pool.
+                cloud.customUpgradePool().add(customId, upgrades.getCount());
+            } else {
+                Upgrade type = CloudworksUpgradeItems.local().typeOf(upgrades);
+                if (type == null) throw error("upgrade");
+                cloud.addUpgradePool(type == Upgrade.SPEED, upgrades.getCount());
+            }
             terminalPublish(session, before.withSlot(3, ItemStack.EMPTY), cloud, null);
         }
     }
 
     private void terminalPublish(TerminalSession session, CloudworksTerminalState state,
                                  CloudworksData cloud, CloudworksMachineCache cache) {
-        if (session.host instanceof mekanism.cloudworks.common.tile.TileEntityCloudDashboard) {
+        if (session.host instanceof TileEntityCloudDashboard) {
             // The terminal intent contains the complete slot projection. Keep
             // the dashboard dirty for vanilla's save path, but avoid writing
             // and compressing the whole region synchronously on every transfer.
@@ -2325,6 +3785,8 @@ public final class CloudworksPlayerDataManager {
 
     public void processTerminalInputs(TerminalSession session) {
         if (session == null) return;
+        if (!CloudworksConfig.settings().terminalItemUploadsEnabled)
+            throw error("terminal_uploads_disabled");
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(session.owner);
             target.processTerminalInputs(session);
@@ -2349,11 +3811,17 @@ public final class CloudworksPlayerDataManager {
                 return;
             }
             ItemStack upgrades = before.stack(3);
-            if (!upgrades.isEmpty() && upgrades.getItem() instanceof mekanism.common.base.IUpgradeItem upgradeItem) {
-                mekanism.common.Upgrade type = upgradeItem.getUpgradeType(upgrades);
-                if (type != mekanism.common.Upgrade.SPEED && type != mekanism.common.Upgrade.ENERGY) throw error("upgrade");
+            if (!upgrades.isEmpty()) {
                 CloudworksData cloud = CloudworksData.read(requireEnabled(session.owner).write());
-                cloud.addUpgradePool(type == mekanism.common.Upgrade.SPEED, upgrades.getCount());
+                ResourceLocation customId =
+                        CloudworksMachineModuleRegistry.typeForItem(upgrades);
+                if (customId != null) {
+                    cloud.customUpgradePool().add(customId, upgrades.getCount());
+                } else {
+                    Upgrade type = CloudworksUpgradeItems.local().typeOf(upgrades);
+                    if (type == null) throw error("upgrade");
+                    cloud.addUpgradePool(type == Upgrade.SPEED, upgrades.getCount());
+                }
                 terminalPublish(session, before.withSlot(3, ItemStack.EMPTY), cloud, null);
             }
         }
@@ -2361,7 +3829,8 @@ public final class CloudworksPlayerDataManager {
 
     private static int terminalRoom(ItemStack current, ItemStack incoming) {
         if (current.isEmpty()) return incoming.getMaxStackSize();
-        if (!ItemStack.areItemsEqual(current, incoming) || !ItemStack.areItemStackTagsEqual(current, incoming)) return 0;
+        if (!ItemStack.areItemsEqual(current, incoming) || !ItemStack.areItemStackTagsEqual(current, incoming))
+            return 0;
         return Math.max(0, incoming.getMaxStackSize() - current.getCount());
     }
 
@@ -2411,8 +3880,9 @@ public final class CloudworksPlayerDataManager {
         synchronized (this) {
             if (!terminalReady(session)) return;
             CloudworksData cloud = CloudworksData.read(requireEnabled(session.owner).write());
-            ItemStack stack = mekanism.common.util.UpgradeUtils.getStack(
-                    speed ? mekanism.common.Upgrade.SPEED : mekanism.common.Upgrade.ENERGY, 1);
+            ItemStack stack = CloudworksUpgradeItems.local().stack(
+                    speed ? Upgrade.SPEED : Upgrade.ENERGY);
+            if (stack.isEmpty()) throw error("upgrade");
             CloudworksTerminalState before = CloudworksTerminalState.capture(session.owner, session.host);
             int wanted = Math.min(cloud.upgradePool(speed), Math.min(shift ? stack.getMaxStackSize() : 1,
                     terminalRoom(before.stack(4), stack)));
@@ -2423,9 +3893,46 @@ public final class CloudworksPlayerDataManager {
         }
     }
 
-    /** Old ownerless dashboards retain the journal owner instead of being claimed by the next visitor. */
-    public void claimDashboard(mekanism.cloudworks.common.tile.TileEntityCloudDashboard dashboard,
-                                             UUID placer) {
+    /**
+     * Withdraws custom-type upgrades from the cloud pool as bound items (8.5-B).
+     */
+    public void terminalDownloadCustomUpgrade(TerminalSession session, String typeId, boolean shift) {
+        if (session == null) return;
+        if (parent == null) {
+            CloudworksPlayerDataManager target = domain(session.owner);
+            target.terminalDownloadCustomUpgrade(session, typeId, shift);
+            return;
+        }
+        synchronized (this) {
+            if (!terminalReady(session)) return;
+            ResourceLocation id;
+            try {
+                id = new ResourceLocation(typeId);
+            } catch (Exception invalid) {
+                throw error("upgrade");
+            }
+            MachineModuleType type =
+                    CloudworksMachineModuleRegistry.type(id);
+            if (type == null || type.slot() != MachineModuleType.Slot.CUSTOM)
+                throw error("upgrade");
+            ItemStack stack = type.item();
+            if (stack.isEmpty()) throw error("upgrade");
+            CloudworksData cloud = CloudworksData.read(requireEnabled(session.owner).write());
+            CloudworksTerminalState before = CloudworksTerminalState.capture(session.owner, session.host);
+            int wanted = (int) Math.min(cloud.customUpgradePool().count(id),
+                    Math.min(shift ? stack.getMaxStackSize() : 1L, terminalRoom(before.stack(4), stack)));
+            if (wanted == 0) return;
+            stack.setCount(wanted);
+            cloud.customUpgradePool().add(id, -wanted);
+            terminalPublish(session, before.withSlot(4, terminalMerge(before.stack(4), stack)), cloud, null);
+        }
+    }
+
+    /**
+     * Old ownerless dashboards retain the journal owner instead of being claimed by the next visitor.
+     */
+    public void claimDashboard(TileEntityCloudDashboard dashboard,
+                               UUID placer) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(terminalOwners.getOrDefault(dashboard.terminalId(), placer));
             target.claimDashboard(dashboard, placer);
@@ -2442,7 +3949,7 @@ public final class CloudworksPlayerDataManager {
         }
     }
 
-    public void detachTerminal(mekanism.cloudworks.common.content.CloudworksTerminalHost host) {
+    public void detachTerminal(CloudworksTerminalHost host) {
         if (parent == null) {
             CloudworksPlayerDataManager target = terminalDomains.get(host.terminalId());
             if (target != null) target.detachTerminal(host);
@@ -2477,6 +3984,8 @@ public final class CloudworksPlayerDataManager {
     }
 
     private Map<String, Path> projectionPaths(UUID owner, NBTTagCompound intent) {
+        ProjectionPlan plan = projectionPlan(intent);
+        if (plan != null) return plan.paths;
         Map<String, Path> paths = new LinkedHashMap<>();
         paths.put("cloud", cloudFile(owner));
         paths.put("receiving", receivingFile(owner));
@@ -2485,6 +3994,10 @@ public final class CloudworksPlayerDataManager {
         if (intent.hasKey("recycle", 10)) paths.put("recycle", recycleFile(owner));
         if (intent.hasKey("machineCache", 10)) paths.put("machineCache", machineCacheFile(owner));
         if (intent.hasKey("blueprintPending", 10)) paths.put("blueprintPending", blueprintPendingFile(owner));
+        if (intent.hasKey("specialNodeDefinitions", 10))
+            paths.put("specialNodeDefinitions", specialNodeDirectory(owner).resolve(CloudworksSpecialNodeStore.NODE_FILE));
+        if (intent.hasKey("infiniteResources", 10))
+            paths.put("infiniteResources", specialNodeDirectory(owner).resolve(CloudworksSpecialNodeStore.RESOURCE_FILE));
         if (intent.hasKey("terminal", 10)) paths.put("terminal", terminalFile(
                 CloudworksTerminalState.read(intent.getCompoundTag("terminal")).terminalId()));
         return paths;
@@ -2500,7 +4013,9 @@ public final class CloudworksPlayerDataManager {
         return delta.write();
     }
 
-    private static void applyCore(CloudworksData cloud, NBTTagCompound core) { cloud.applyCore(core); }
+    private static void applyCore(CloudworksData cloud, NBTTagCompound core) {
+        cloud.applyCore(core);
+    }
 
     private static void applyMemoryDelta(CloudworksData cloud, NBTTagCompound delta) {
         for (String name : new String[]{"receiving", "transfer", "sending"}) {
@@ -2617,7 +4132,7 @@ public final class CloudworksPlayerDataManager {
     private void prepareProjectionFingerprints(UUID owner, NBTTagCompound intent) {
         CloudworksData cloud = CloudworksData.read(intent.getCompoundTag("cloud"));
         IoReads batch = IO_READS.get();
-        if (batch != null) batch.projections.put(intent, new ProjectionPlan(cloud));
+        if (batch != null) batch.projections.put(intent, new ProjectionPlan(cloud, projectionPaths(owner, intent)));
         NBTTagCompound previous = new NBTTagCompound(), next = new NBTTagCompound();
         NBTTagCompound existed = new NBTTagCompound();
         for (Map.Entry<String, Path> entry : projectionPaths(owner, intent).entrySet()) {
@@ -2651,7 +4166,7 @@ public final class CloudworksPlayerDataManager {
     }
 
     private void writeIntentProjection(NBTTagCompound intent, String key, Path file,
-            NBTTagCompound next, NBTTagCompound previous, boolean strict) {
+                                       NBTTagCompound next, NBTTagCompound previous, boolean strict) {
         next = preservePortWatermark(file, next);
         if (intent.hasKey("previousFingerprints", 10)) {
             byte[] nextHash = intent.getCompoundTag("nextFingerprints").getByteArray(key);
@@ -2661,13 +4176,16 @@ public final class CloudworksPlayerDataManager {
                 return;
         }
         writeProjection(file, next, previous, strict);
+        IoReads cache = IO_READS.get();
+        if (cache != null && intent.hasKey("nextFingerprints", 10))
+            cache.fingerprints.put(file, intent.getCompoundTag("nextFingerprints").getByteArray(key).clone());
     }
 
     /**
      * Configures the four warehouse energy flows; persisted in cloud.dat.
      */
     public void setEnergyFlows(UUID owner, boolean receivingToCloud, boolean receivingToLines,
-                                            boolean cloudToSending, boolean linesToSending) {
+                               boolean cloudToSending, boolean linesToSending) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
             target.setEnergyFlows(owner, receivingToCloud, receivingToLines, cloudToSending, linesToSending);
@@ -2694,31 +4212,7 @@ public final class CloudworksPlayerDataManager {
      * when the cloud is not available.
      */
     public int expandLineLimit(UUID owner) {
-        if (parent == null) {
-            CloudworksPlayerDataManager target = domain(owner);
-            return target.expandLineLimit(owner);
-        }
-        synchronized (this) {
-            CloudworksData cloud;
-            try {
-                cloud = requireEnabled(owner);
-            } catch (RuntimeException unavailable) {
-                return -1;
-            }
-            int maximum = mekanism.cloudworks.common.config.CloudworksConfig.settings().maxLines;
-            if (cloud.unlockedLines() >= maximum) return -2;
-            int unlocked = cloud.unlockedLines() + 1;
-            CloudworksData previous = cloud.copyForRuntime();
-            try {
-                cloud.setLimits(unlocked, Math.max(cloud.maxLines(), unlocked), cloud.workRate());
-                publishTags(owner, cloud.write(), Collections.emptyList());
-                drainInteraction();
-                return unlocked;
-            } catch (RuntimeException failure) {
-                clouds.put(owner, previous);
-                throw failure;
-            }
-        }
+        return legacyCardResult(owner, CloudworksCardEffects.LINE_EXPANSION);
     }
 
     /**
@@ -2727,49 +4221,28 @@ public final class CloudworksPlayerDataManager {
      * Returns the new ceiling, -1 when unavailable, or -2 at the limit.
      */
     public int expandNodeLimit(UUID owner, int amount) {
-        if (parent == null) {
-            CloudworksPlayerDataManager target = domain(owner);
-            return target.expandNodeLimit(owner, amount);
-        }
-        synchronized (this) {
-            CloudworksData cloud;
-            try {
-                cloud = requireEnabled(owner);
-            } catch (RuntimeException unavailable) {
-                return -1;
-            }
-            if (amount <= 0) throw new IllegalArgumentException("Expansion amount must be positive");
-            int maximum = mekanism.cloudworks.common.config.CloudworksConfig.settings().maxMachineNodes;
-            if (cloud.maxMachineNodes() >= maximum) return -2;
-            int ceiling = (int) Math.min(maximum, (long) cloud.maxMachineNodes() + amount);
-            CloudworksData previous = cloud.copyForRuntime();
-            try {
-                cloud.setMaxMachineNodes(ceiling);
-                publishTags(owner, cloud.write(), Collections.emptyList());
-                drainInteraction();
-                return ceiling;
-            } catch (RuntimeException failure) {
-                clouds.put(owner, previous);
-                throw failure;
-            }
-        }
+        return legacyCardResult(owner, CloudworksCardEffects.NODE_EXPANSION.withAmount(amount));
     }
 
     public int increaseWorkRate(UUID owner) {
-        if (parent == null) return domain(owner).increaseWorkRate(owner);
+        return legacyCardResult(owner, CloudworksCardEffects.WORK_RATE);
+    }
+
+    public int increaseLineBufferMultiplier(UUID owner, UUID lineId) {
+        if (parent == null) return domain(owner).increaseLineBufferMultiplier(owner, lineId);
         synchronized (this) {
-            CloudworksData cloud;
-            try { cloud = requireEnabled(owner); } catch (RuntimeException unavailable) { return -1; }
-            if (cloud.workRate() >= mekanism.cloudworks.common.config.CloudworksConfig.settings().maxWorkRate) return -2;
-            int next = cloud.workRate() + 1;
-            CloudworksData previous = cloud.copyForRuntime();
+            ProductionLineData line = owned(owner, lineId);
+            if (line == null || line.enabled()) return -1;
+            int maximum = CloudworksConfig.settings().maxLineBufferMultiplier;
+            if (line.nodeBufferMultiplier() >= maximum) return -2;
+            ProductionLineData previous = ProductionLineData.read(line.write());
+            line.setNodeBufferMultiplier(line.nodeBufferMultiplier() + 1);
             try {
-                cloud.setLimits(cloud.unlockedLines(), cloud.maxLines(), next);
-                publishTags(owner, cloud.write(), Collections.emptyList());
+                publishTags(owner, requireEnabled(owner).write(), Collections.singletonList(line.write()));
                 drainInteraction();
-                return next;
+                return line.nodeBufferMultiplier();
             } catch (RuntimeException failure) {
-                clouds.put(owner, previous);
+                lines.put(lineId, previous);
                 throw failure;
             }
         }
@@ -2785,13 +4258,15 @@ public final class CloudworksPlayerDataManager {
         return globalSimulatedTick;
     }
 
-    /** Mirrors the overworld day cycle in the cloud clock's 1..24000 domain. */
+    /**
+     * Mirrors the overworld day cycle in the cloud clock's 1..24000 domain.
+     */
     public synchronized int syncSimulatedClock(long worldTime) {
         globalSimulatedTick = (int) Math.floorMod(worldTime, 24000L) + 1;
         return globalSimulatedTick;
     }
 
-    public synchronized int simulatedTick() {
+    public int simulatedTick() {
         return globalSimulatedTick;
     }
 
@@ -2801,76 +4276,10 @@ public final class CloudworksPlayerDataManager {
             return target.generationContext(owner);
         }
         synchronized (this) {
-            CloudworksData cloud = requireEnabled(owner);
-            return new CloudworksGenerationContext(cloud.simulatedHeight(),
+            requireEnabled(owner);
+            return new CloudworksGenerationContext(0,
                     parent == null ? globalSimulatedTick : parent.globalSimulatedTick,
-                    cloud.lavaHeatCards(), cloud.netherEnvironmentCard());
-        }
-    }
-
-    public int expandSimulatedHeight(UUID owner) {
-        if (parent == null) {
-            CloudworksPlayerDataManager target = domain(owner);
-            return target.expandSimulatedHeight(owner);
-        }
-        synchronized (this) {
-            CloudworksData cloud;
-            try { cloud = requireEnabled(owner); } catch (RuntimeException unavailable) { return -1; }
-            if (cloud.simulatedHeight() >= 256) return -2;
-            CloudworksData previous = cloud.copyForRuntime();
-            try {
-                cloud.setSimulatedHeight(cloud.simulatedHeight() + 1);
-                publishTags(owner, cloud.write(), Collections.emptyList());
-                drainInteraction();
-                return cloud.simulatedHeight();
-            } catch (RuntimeException failure) {
-                clouds.put(owner, previous);
-                throw failure;
-            }
-        }
-    }
-
-    public int expandLavaHeat(UUID owner) {
-        if (parent == null) {
-            CloudworksPlayerDataManager target = domain(owner);
-            return target.expandLavaHeat(owner);
-        }
-        synchronized (this) {
-            CloudworksData cloud;
-            try { cloud = requireEnabled(owner); } catch (RuntimeException unavailable) { return -1; }
-            if (cloud.lavaHeatCards() >= 7) return -2;
-            CloudworksData previous = cloud.copyForRuntime();
-            try {
-                cloud.setLavaHeatCards(cloud.lavaHeatCards() + 1);
-                publishTags(owner, cloud.write(), Collections.emptyList());
-                drainInteraction();
-                return cloud.lavaHeatCards();
-            } catch (RuntimeException failure) {
-                clouds.put(owner, previous);
-                throw failure;
-            }
-        }
-    }
-
-    public boolean unlockNetherEnvironment(UUID owner) {
-        if (parent == null) {
-            CloudworksPlayerDataManager target = domain(owner);
-            return target.unlockNetherEnvironment(owner);
-        }
-        synchronized (this) {
-            CloudworksData cloud;
-            try { cloud = requireEnabled(owner); } catch (RuntimeException unavailable) { return false; }
-            if (cloud.netherEnvironmentCard()) return false;
-            CloudworksData previous = cloud.copyForRuntime();
-            try {
-                cloud.setNetherEnvironmentCard(true);
-                publishTags(owner, cloud.write(), Collections.emptyList());
-                drainInteraction();
-                return true;
-            } catch (RuntimeException failure) {
-                clouds.put(owner, previous);
-                throw failure;
-            }
+                    0, false);
         }
     }
 
@@ -2896,13 +4305,13 @@ public final class CloudworksPlayerDataManager {
      * the Runtime itself never acknowledges an inventory object.</p>
      */
     public CloudworksUploadResult uploadMachines(ICloudworksUploadSource source,
-                                                              UUID lineId, ItemStack stack, int count) {
+                                                 UUID lineId, ItemStack stack, int count) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(Objects.requireNonNull(source, "source").owner());
             return target.uploadMachines(source, lineId, stack, count);
         }
         synchronized (this) {
-            return uploadMachines(source, lineId, stack, count, 0, 0, 0);
+            return uploadMachines(source, lineId, stack, count, 0, 0);
         }
     }
 
@@ -2910,10 +4319,10 @@ public final class CloudworksPlayerDataManager {
      * Coordinate form with the new node's editor placement (GUI supplies it later).
      */
     public CloudworksUploadResult uploadMachines(ICloudworksUploadSource source,
-                                                              UUID lineId, ItemStack stack, int count, int x, int z, int dimensionId) {
+                                                 UUID lineId, ItemStack stack, int count, int x, int z) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(Objects.requireNonNull(source, "source").owner());
-            return target.uploadMachines(source, lineId, stack, count, x, z, dimensionId);
+            return target.uploadMachines(source, lineId, stack, count, x, z);
         }
         synchronized (this) {
             Objects.requireNonNull(source, "source");
@@ -2945,12 +4354,15 @@ public final class CloudworksPlayerDataManager {
                 return CloudworksUploadResult.refused(CloudworksUploadResult.Refusal.LINE_NOT_FOUND);
             }
             if (line.enabled()) return CloudworksUploadResult.refused(CloudworksUploadResult.Refusal.LINE_ACTIVE);
-            if (line.machines().size() >= Math.min(cloud.maxMachineNodes(),
-                    mekanism.cloudworks.common.config.CloudworksConfig.settings().maxMachineNodes))
+            if (line.machines().size() + line.auxiliaries().size() >= Math.min(cloud.maxMachineNodes(),
+                    CloudworksConfig.settings().maxMachineNodes))
                 return CloudworksUploadResult.refused(CloudworksUploadResult.Refusal.NODE_LIMIT);
-            if (count > mekanism.cloudworks.common.config.CloudworksConfig.settings().maxMachinesPerNode)
+            if (count > CloudworksConfig.settings().maxMachinesPerNode)
                 return CloudworksUploadResult.refused(CloudworksUploadResult.Refusal.COUNT_INVALID);
-            if (!CloudworksRegistries.isRegistered(stack))
+            boolean auxiliaryUpload = CloudworksAuxiliaryNodeRegistry.byItem(stack) != null;
+            if (auxiliaryUpload && count != 1)
+                return CloudworksUploadResult.refused(CloudworksUploadResult.Refusal.COUNT_INVALID);
+            if (!CloudworksRegistries.isRegistered(stack) && !auxiliaryUpload)
                 return CloudworksUploadResult.refused(CloudworksUploadResult.Refusal.MACHINE_UNREGISTERED);
             UUID sourceId = source.sourceId();
             if (sourceId == null) return CloudworksUploadResult.refused(CloudworksUploadResult.Refusal.SOURCE_REFUSED);
@@ -2968,7 +4380,7 @@ public final class CloudworksPlayerDataManager {
                 return CloudworksUploadResult.refused(CloudworksUploadResult.Refusal.SOURCE_REFUSED);
             }
             NBTTagCompound previousLine = line.write();
-            mekanism.cloudworks.common.data.CloudworksMachineCache cache = machineCache(owner);
+            CloudworksMachineCache cache = machineCache(owner);
             NBTTagCompound previousCache = cache.write();
             CloudworksData previousCloud = cloud.copyForRuntime();
             UUID nodeId = UUID.randomUUID();
@@ -2976,12 +4388,18 @@ public final class CloudworksPlayerDataManager {
                 ItemStack machineStack = reservation.machineStack();
                 machineStack.setCount(count);
                 cache.deposit(machineStack, count);
-                MachineNodeData node = new MachineNodeData(nodeId, machineStack, x, z);
-                node.setDimensionId(dimensionId);
-                node.setMachineCount(count);
-                node.setActive(true);
-                node.setUploadOrigin(transferId, sourceId);
-                line.machines().add(node);
+                if (auxiliaryUpload) {
+                    CloudworksAuxiliaryNodeData node = new CloudworksAuxiliaryNodeData(nodeId, machineStack, x, z);
+                    node.setActive(true);
+                    node.setUploadOrigin(transferId, sourceId);
+                    line.auxiliaries().add(node);
+                } else {
+                    MachineNodeData node = new MachineNodeData(nodeId, machineStack, x, z);
+                    node.setMachineCount(count);
+                    node.setActive(true);
+                    node.setUploadOrigin(transferId, sourceId);
+                    line.machines().add(node);
+                }
                 refreshLineUpgrades(cloud, line);
                 NBTTagCompound transfer = new NBTTagCompound();
                 transfer.setInteger("schema", 1);
@@ -2989,6 +4407,7 @@ public final class CloudworksPlayerDataManager {
                 transfer.setString("sourceId", sourceId.toString());
                 transfer.setString("lineId", lineId.toString());
                 transfer.setString("nodeId", nodeId.toString());
+                if (auxiliaryUpload) transfer.setString("kind", "auxiliary");
                 transfer.setString("sourceSlot", reservation.sourceSlot() == null ? "" : reservation.sourceSlot());
                 transfer.setTag("machineStack", reservation.machineStack().writeToNBT(new NBTTagCompound()));
                 transfer.setInteger("count", count);
@@ -3016,7 +4435,7 @@ public final class CloudworksPlayerDataManager {
                 throw new IllegalStateException("cloudworks.error.storage");
             } catch (RuntimeException failure) {
                 lines.put(lineId, ProductionLineData.read(previousLine));
-                machineCaches.put(owner, mekanism.cloudworks.common.data.CloudworksMachineCache.read(previousCache));
+                machineCaches.put(owner, CloudworksMachineCache.read(previousCache));
                 clouds.put(owner, previousCloud);
                 // The durable state alone decides the source disposition: an
                 // intent file carrying this transferId (or an applied node)
@@ -3046,7 +4465,7 @@ public final class CloudworksPlayerDataManager {
      * owner semantics. The stack must be the node's exact variant.
      */
     public CloudworksUploadResult mergeMachines(ICloudworksUploadSource source,
-                                                             UUID lineId, UUID nodeId, ItemStack stack, int count) {
+                                                UUID lineId, UUID nodeId, ItemStack stack, int count) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(Objects.requireNonNull(source, "source").owner());
             return target.mergeMachines(source, lineId, nodeId, stack, count);
@@ -3075,7 +4494,7 @@ public final class CloudworksPlayerDataManager {
             MachineNodeData target = null;
             for (MachineNodeData node : line.machines()) if (node.nodeId().equals(nodeId)) target = node;
             if (target == null) return CloudworksUploadResult.refused(CloudworksUploadResult.Refusal.LINE_NOT_FOUND);
-            if (count > mekanism.cloudworks.common.config.CloudworksConfig.settings().maxMachinesPerNode - target.machineCount())
+            if (count > CloudworksConfig.settings().maxMachinesPerNode - target.machineCount())
                 return CloudworksUploadResult.refused(CloudworksUploadResult.Refusal.COUNT_INVALID);
             if (!CloudworksRegistries.isRegistered(stack))
                 return CloudworksUploadResult.refused(CloudworksUploadResult.Refusal.MACHINE_UNREGISTERED);
@@ -3098,7 +4517,7 @@ public final class CloudworksPlayerDataManager {
                 return CloudworksUploadResult.refused(CloudworksUploadResult.Refusal.SOURCE_REFUSED);
             }
             NBTTagCompound previousLine = line.write();
-            mekanism.cloudworks.common.data.CloudworksMachineCache cache = machineCache(owner);
+            CloudworksMachineCache cache = machineCache(owner);
             NBTTagCompound previousCache = cache.write();
             CloudworksData previousCloud = cloud.copyForRuntime();
             long machineTotal = Math.addExact(target.machineCount(), count);
@@ -3136,7 +4555,7 @@ public final class CloudworksPlayerDataManager {
                 throw new IllegalStateException("cloudworks.error.storage");
             } catch (RuntimeException failure) {
                 lines.put(lineId, ProductionLineData.read(previousLine));
-                machineCaches.put(owner, mekanism.cloudworks.common.data.CloudworksMachineCache.read(previousCache));
+                machineCaches.put(owner, CloudworksMachineCache.read(previousCache));
                 clouds.put(owner, previousCloud);
                 boolean durable;
                 try {
@@ -3220,7 +4639,8 @@ public final class CloudworksPlayerDataManager {
     public int completePendingUploadAcknowledgements() {
         if (parent == null) {
             int total = 0;
-            for (CloudworksPlayerDataManager target : domains.values()) total += target.completePendingUploadAcknowledgements();
+            for (CloudworksPlayerDataManager target : domains.values())
+                total += target.completePendingUploadAcknowledgements();
             return total;
         }
         synchronized (this) {
@@ -3309,7 +4729,7 @@ public final class CloudworksPlayerDataManager {
                         if (stored == null || stored.isEmpty() || !ItemStack.areItemsEqual(stored, machine)) continue;
                         NBTTagCompound storedTag = stored.getTagCompound();
                         NBTTagCompound wantedTag = machine.getTagCompound();
-                        if (!java.util.Objects.equals(
+                        if (!Objects.equals(
                                 storedTag == null ? new NBTTagCompound() : stripCapsCopy(storedTag),
                                 wantedTag == null ? new NBTTagCompound() : stripCapsCopy(wantedTag))) continue;
                         long take = Math.min(missing, stored.getCount());
@@ -3324,8 +4744,9 @@ public final class CloudworksPlayerDataManager {
                     } else {
                         // Keep the remainder durable: retried next login, auditable forever.
                         entry.setInteger("count", (int) Math.min(missing, Integer.MAX_VALUE));
-                        System.err.println("CLOUDWORKS-DEBIT-RECOVERY shortfall transfer=" + entry.getString("transferId")
-                                + " player=" + player + " missing=" + missing);
+                        Mekanism.logger.warn(
+                                "Cloudworks debit recovery shortfall transfer={} player={} missing={}",
+                                entry.getString("transferId"), player, missing);
                         debugDebitRecoveryShortfalls.incrementAndGet();
                     }
                     changed = true;
@@ -3346,7 +4767,7 @@ public final class CloudworksPlayerDataManager {
     /**
      * Live-player form used by the login hook; main thread only.
      */
-    public void applySourceDebts(net.minecraft.entity.player.EntityPlayerMP player) {
+    public void applySourceDebts(EntityPlayerMP player) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(player.getUniqueID());
             target.applySourceDebts(player);
@@ -3373,7 +4794,7 @@ public final class CloudworksPlayerDataManager {
             if (intent.hasKey("transfer", 10) && transferId.equals(
                     UUID.fromString(intent.getCompoundTag("transfer").getString("transferId")))) return true;
         }
-        Path production = root.resolve(owner.toString()).resolve("production");
+        Path production = ownerDirectory(owner).resolve("production");
         if (!Files.isDirectory(production)) return false;
         try (DirectoryStream<Path> files = Files.newDirectoryStream(production, "*.dat")) {
             for (Path file : files) {
@@ -3385,7 +4806,7 @@ public final class CloudworksPlayerDataManager {
                             && transferId.equals(UUID.fromString(node.getString("transferId")))) return true;
                 }
             }
-        } catch (IOException | java.nio.file.DirectoryIteratorException failure) {
+        } catch (IOException | DirectoryIteratorException failure) {
             throw dataError(failure);
         }
         return false;
@@ -3418,7 +4839,7 @@ public final class CloudworksPlayerDataManager {
             // both the node's caches and the bin. Any pre-submit failure rolls the
             // in-memory line and bin back so the removal stays retryable (P1).
             NBTTagCompound previousLine = line.write();
-            mekanism.cloudworks.common.data.CloudworksRecycleBin bin = recycleBin(owner);
+            CloudworksRecycleBin bin = recycleBin(owner);
             NBTTagCompound previousBin = bin.write();
             CloudworksData cloud = requireEnabled(owner);
             CloudworksData previousCloud = cloud.copyForRuntime();
@@ -3435,7 +4856,7 @@ public final class CloudworksPlayerDataManager {
                 return true;
             } catch (RuntimeException failure) {
                 lines.put(lineId, ProductionLineData.read(previousLine));
-                recycleBins.put(owner, mekanism.cloudworks.common.data.CloudworksRecycleBin.read(previousBin));
+                recycleBins.put(owner, CloudworksRecycleBin.read(previousBin));
                 clouds.put(owner, previousCloud);
                 throw failure;
             }
@@ -3443,7 +4864,7 @@ public final class CloudworksPlayerDataManager {
     }
 
     public ProductionLineLink addLink(UUID owner, UUID lineId, UUID sourceNode, String sourcePort,
-                                                   UUID targetNode, String targetPort) {
+                                      UUID targetNode, String targetPort) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
             return target.addLink(owner, lineId, sourceNode, sourcePort, targetNode, targetPort);
@@ -3454,7 +4875,7 @@ public final class CloudworksPlayerDataManager {
     }
 
     public ProductionLineLink addLink(UUID owner, UUID lineId, UUID sourceNode, String sourcePort,
-                                                   UUID targetNode, String targetPort, int priority, double ratio) {
+                                      UUID targetNode, String targetPort, int priority, double ratio) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
             return target.addLink(owner, lineId, sourceNode, sourcePort, targetNode, targetPort, priority, ratio);
@@ -3474,7 +4895,7 @@ public final class CloudworksPlayerDataManager {
             CloudworksTopologyValidator.Result validation = CloudworksTopologyValidator.validate(line);
             if (!validation.valid()) {
                 line.links().remove(link);
-                throw error("invalid_link");
+                throw error(validation.errorKey());
             }
             writeCheckpoint(line);
             changed(owner);
@@ -3514,7 +4935,43 @@ public final class CloudworksPlayerDataManager {
      * 升级层: any edit that lowers upgrade caps clamps the installed counts — the
      * clamped-away upgrades return to the cloud pool instead of vanishing.
      */
-    public void edit(UUID owner, UUID id, java.util.function.Consumer<ProductionLineData> edit) {
+    /**
+     * B5 edit guard: nodes frozen by a missing mod keep byte-identical data; the
+     * only permitted change is removal. Links may not be added to or modified on
+     * a frozen endpoint (deleting the node removes its links via removeNode).
+     */
+    static void refuseFrozenNodeEdits(NBTTagCompound previous, ProductionLineData line) {
+        Set<UUID> frozen = new HashSet<>();
+        for (MachineNodeData node : line.machines())
+            if (node.frozenByMissingMod()) frozen.add(node.nodeId());
+        if (frozen.isEmpty()) return;
+        NBTTagList previousMachines = previous.getTagList("machines", 10);
+        Map<UUID, NBTTagCompound> before = new HashMap<>();
+        for (int index = 0; index < previousMachines.tagCount(); index++) {
+            NBTTagCompound tag = previousMachines.getCompoundTagAt(index);
+            before.put(UUID.fromString(tag.getString("nodeId")), tag);
+        }
+        for (MachineNodeData node : line.machines())
+            if (node.frozenByMissingMod()) {
+                NBTTagCompound snapshot = before.get(node.nodeId());
+                if (snapshot == null || !snapshot.equals(node.write()))
+                    throw error("node_frozen");
+            }
+        NBTTagList previousLinks = previous.getTagList("links", 10);
+        Map<UUID, NBTTagCompound> beforeLinks = new HashMap<>();
+        for (int index = 0; index < previousLinks.tagCount(); index++) {
+            NBTTagCompound tag = previousLinks.getCompoundTagAt(index);
+            beforeLinks.put(UUID.fromString(tag.getString("linkId")), tag);
+        }
+        for (ProductionLineLink link : line.links())
+            if (frozen.contains(link.sourceNode()) || frozen.contains(link.targetNode())) {
+                NBTTagCompound snapshot = beforeLinks.get(link.linkId());
+                if (snapshot == null || !snapshot.equals(link.write()))
+                    throw error("node_frozen");
+            }
+    }
+
+    public void edit(UUID owner, UUID id, Consumer<ProductionLineData> edit) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
             target.edit(owner, id, edit);
@@ -3529,9 +4986,10 @@ public final class CloudworksPlayerDataManager {
             int speedBefore = line.speedUpgrades(), energyBefore = line.energyUpgrades();
             try {
                 edit.accept(line);
+                refuseFrozenNodeEdits(previous, line);
                 boolean cancelledBlueprint = cancelMissingPending(owner, line);
-                mekanism.cloudworks.common.config.CloudworksConfig.Settings settings =
-                        mekanism.cloudworks.common.config.CloudworksConfig.settings();
+                CloudworksConfig.Settings settings =
+                        CloudworksConfig.settings();
                 if (line.machines().size() > Math.max(Math.min(cloud.maxMachineNodes(), settings.maxMachineNodes),
                         previous.getTagList("machines", 10).tagCount())) throw error("node_limit");
                 Map<UUID, Long> previousCounts = new HashMap<>();
@@ -3543,11 +5001,13 @@ public final class CloudworksPlayerDataManager {
                 for (MachineNodeData node : line.machines())
                     if (node.machineCount() > Math.max(settings.maxMachinesPerNode,
                             previousCounts.getOrDefault(node.nodeId(), 0L))) throw error("machine_count_limit");
+                settleNodeCustomUpgrades(cloud, line,
+                        CloudworksUpgradeLimits.customAssignments(line.machines()));
                 double storedEnergy = line.energy();
                 line.recomputeUpgradeLimits();
                 settleLineEnergy(cloud, line, storedEnergy);
                 CloudworksTopologyValidator.Result valid = CloudworksTopologyValidator.validate(line);
-                if (!valid.valid()) throw error("invalid_link");
+                if (!valid.valid()) throw error(valid.errorKey());
                 int speedDropped = speedBefore - line.speedUpgrades();
                 int energyDropped = energyBefore - line.energyUpgrades();
                 returnUpgradesToPool(cloud, speedDropped, energyDropped);
@@ -3558,7 +5018,11 @@ public final class CloudworksPlayerDataManager {
                     // Counts and returned upgrades must be published together.
                     publishTags(owner, cloud.write(), Collections.singletonList(line.write()));
                 } else {
+                    List<CloudworksModuleEvents.Event> lifecycleEvents = CloudworksModuleEvents.candidateChanges(
+                            ProductionLineData.read(previous), line, new CloudworksGenerationContext(0,
+                                    parent == null ? globalSimulatedTick : parent.globalSimulatedTick, 0, false));
                     writeCheckpoint(line);
+                    CloudworksModuleEvents.enqueue(lifecycleEvents);
                 }
                 changed(owner);
             } catch (RuntimeException failure) {
@@ -3571,8 +5035,11 @@ public final class CloudworksPlayerDataManager {
 
     @Nullable
     private static TerminalEnergyPayload terminalEnergyPayload(ItemStack stack) {
-        if (!mekanism.cloudworks.common.content.CloudworksTerminalSlots.acceptsEnergy(stack)) {
+        if (!CloudworksTerminalSlots.acceptsEnergy(stack)) {
             return null;
+        }
+        if (CloudworksAPI.isInfiniteEnergyItem(stack)) {
+            return new TerminalEnergyPayload(1D, true);
         }
         IStrictEnergyHandler handler = EnergyCompatUtils.getStrictEnergyHandler(stack);
         if (handler == null) return null;
@@ -3686,10 +5153,10 @@ public final class CloudworksPlayerDataManager {
             boolean running = line.enabled();
             if (running) toggleLine(owner, id, false);
             line = owned(owner, id);
-            mekanism.cloudworks.common.network.data.CloudworksLineDraft initial = CloudworksLineConfiguration.capture(line);
+            CloudworksLineDraft initial = CloudworksLineConfiguration.capture(line);
             initial.enabled = running;
             initial.maxNodes = Math.min(requireEnabled(owner).maxMachineNodes(),
-                    mekanism.cloudworks.common.config.CloudworksConfig.settings().maxMachineNodes);
+                    CloudworksConfig.settings().maxMachineNodes);
             CloudworksLineEditSession session = new CloudworksLineEditSession(owner, id, running, structuralLine(line.write()), initial);
             CloudworksPendingBlueprint waiting = pendingBlueprints.get(owner);
             if (waiting != null && waiting.line.equals(id)) session.pending = waiting;
@@ -3698,15 +5165,14 @@ public final class CloudworksPlayerDataManager {
         }
     }
 
-    public void updateLineDraft(CloudworksLineEditSession session, CloudworksLineDraft draft, int dimension) {
-        if (parent == null) { domain(session.owner).updateLineDraft(session, draft, dimension); return; }
+    public void updateLineDraft(CloudworksLineEditSession session, CloudworksLineDraft draft) {
+        if (parent == null) {
+            domain(session.owner).updateLineDraft(session, draft);
+            return;
+        }
         synchronized (this) {
             requireEdit(session);
             CloudworksLineDraft next = CloudworksLineDraftCodec.copy(draft);
-            Set<UUID> existing = new HashSet<>();
-            session.current.machines.forEach(machine -> existing.add(machine.id));
-            for (CloudworksLineDraft.Machine machine : next.machines)
-                if (!existing.contains(machine.id)) machine.dimension = dimension;
             CloudworksPendingBlueprint previous = session.pending;
             boolean cancel = previous != null && !nodeIds(next).containsAll(previous.nodes());
             if (cancel) {
@@ -3718,10 +5184,14 @@ public final class CloudworksPlayerDataManager {
                 CloudworksLineDraft unchanged = CloudworksLineDraftCodec.copy(session.current);
                 next.machines.forEach(machine -> machine.missing = 0);
                 unchanged.machines.forEach(machine -> machine.missing = 0);
-                if (!cancel && Arrays.equals(CloudworksLineDraftCodec.encode(next), CloudworksLineDraftCodec.encode(unchanged))) return;
-                if (cancel) commitLineEdit0(session, next, dimension, false);
+                if (!cancel && Arrays.equals(CloudworksLineDraftCodec.encode(next), CloudworksLineDraftCodec.encode(unchanged)))
+                    return;
+                if (cancel) commitLineEdit0(session, next, false);
                 session.current = next;
-            } catch (RuntimeException failure) { session.pending = previous; throw failure; }
+            } catch (RuntimeException failure) {
+                session.pending = previous;
+                throw failure;
+            }
         }
     }
 
@@ -3735,21 +5205,53 @@ public final class CloudworksPlayerDataManager {
         }
     }
 
+    public CloudworksLineDraft blueprintExportDraft(UUID owner, UUID lineId, CloudworksLineEditSession session) {
+        if (parent == null) return domain(owner).blueprintExportDraft(owner, lineId, session);
+        synchronized (this) {
+            ProductionLineData line = owned(owner, lineId);
+            if (line == null) throw error("not_found");
+            boolean editing = session != null && owner.equals(session.owner) && lineId.equals(session.line);
+            if (editing) requireEdit(session);
+            CloudworksLineDraft draft = editing ? session.snapshot() : CloudworksLineConfiguration.capture(line);
+            CloudworksPendingBlueprint pending = editing ? session.pending : pendingBlueprints.get(owner);
+            return pending != null && lineId.equals(pending.line) ? pending.exportDraft(draft) : draft;
+        }
+    }
+
     public void precheckBlueprint(CloudworksLineEditSession session, CloudworksBlueprint blueprint) {
-        if (parent == null) { domain(session.owner).precheckBlueprint(session, blueprint); return; }
+        if (parent == null) {
+            domain(session.owner).precheckBlueprint(session, blueprint);
+            return;
+        }
         synchronized (this) {
             requireEdit(session);
             blueprint.validate();
-            if (session.pending != null || pendingBlueprints.get(session.owner) != null) throw error("blueprint_pending");
+            CloudworksSpecialNodeStore.Snapshot specialNodes = specialNodeStore(session.owner).load();
+            for (CloudworksLineDraft.Channel channel : blueprint.draft().channels) {
+                if (!CloudworksSpecialNodeArchetypes.INFINITE_RESOURCES.toString()
+                        .equals(channel.archetypeId)) continue;
+                if (channel.resources.size() != 1
+                        || !specialNodes.resources.containsKey(channel.resources.get(0).descriptor))
+                    throw error("special_node_resource_unavailable");
+            }
+            CloudworksLineDraft combined = CloudworksLineDraftCodec.copy(session.current);
+            combined.channels.addAll(blueprint.draft().channels);
+            validateSpecialNodePermissions(session.owner, session.line, combined, false);
+            if (session.pending != null || pendingBlueprints.get(session.owner) != null)
+                throw error("blueprint_pending");
             int maximum = Math.min(requireEnabled(session.owner).maxMachineNodes(),
-                    mekanism.cloudworks.common.config.CloudworksConfig.settings().maxMachineNodes);
-            if ((long) session.current.machines.size() + blueprint.draft().machines.size() > maximum) throw error("node_limit");
+                    CloudworksConfig.settings().maxMachineNodes);
+            if ((long) session.current.machines.size() + blueprint.draft().machines.size() > maximum)
+                throw error("node_limit");
         }
     }
 
     public void placeBlueprint(CloudworksLineEditSession session, CloudworksBlueprint blueprint,
-            int anchorX, int anchorY, int dimension) {
-        if (parent == null) { domain(session.owner).placeBlueprint(session, blueprint, anchorX, anchorY, dimension); return; }
+                               int anchorX, int anchorY) {
+        if (parent == null) {
+            domain(session.owner).placeBlueprint(session, blueprint, anchorX, anchorY);
+            return;
+        }
         synchronized (this) {
             precheckBlueprint(session, blueprint);
             CloudworksLineDraft placed = blueprint.remap(session.line, anchorX, anchorY);
@@ -3760,8 +5262,13 @@ public final class CloudworksPlayerDataManager {
             for (CloudworksLineDraft.Machine machine : placed.machines) {
                 CloudworksLineDraft.Machine node = new CloudworksLineDraft.Machine(machine.id, machine.type,
                         machine.x, machine.y, enough ? machine.count : 0);
-                node.dimension = machine.dimension; node.active = machine.active;
+                node.active = machine.active;
+                node.recipeType = machine.recipeType;
+                node.oreRules.addAll(machine.oreRules);
+                node.fusionInjectionRate = machine.fusionInjectionRate;
+                if (enough) node.assignedCustom.putAll(machine.assignedCustom);
                 node.waiting = waiting == null ? null : waiting.id;
+                node.waitingMechanism = enough ? "" : CloudworksNodeMechanisms.activeId(machine);
                 node.required = enough ? 0 : machine.count;
                 node.missing = node.required;
                 next.machines.add(node);
@@ -3771,7 +5278,7 @@ public final class CloudworksPlayerDataManager {
                 next.channels.add(channel);
             }
             next.links.addAll(placed.links);
-            for (mekanism.api.qio.resource.QIOResourceDescriptor marker : placed.markers)
+            for (QIOResourceDescriptor marker : placed.markers)
                 if (next.markers.size() < 25 && !next.markers.contains(marker)) next.markers.add(marker);
             next.explicitRouting |= placed.explicitRouting || !placed.channels.isEmpty();
             next.receivingFlow = placed.receivingFlow;
@@ -3779,19 +5286,33 @@ public final class CloudworksPlayerDataManager {
             CloudworksPendingBlueprint previous = session.pending;
             session.pending = waiting;
             try {
+                if (enough) coverBlueprintUpgrades(next);
                 normalizeUpgradeLimits(next);
                 validateEditorDraft(session, next);
-                commitLineEdit0(session, next, dimension, false);
+                // 9.x portability: adopt the blueprint's extension carrier before the
+                // commit re-reads the live line; the merge is target-wins and bounded.
+                NBTTagCompound extensionCarrier = blueprint.extensionsCarrier();
+                if (!extensionCarrier.getKeySet().isEmpty()) {
+                    ProductionLineData live = owned(session.owner, session.line);
+                    if (live != null) live.extensions().mergeFrom(extensionCarrier);
+                }
+                commitLineEdit0(session, next, false);
                 session.current = next;
-            } catch (RuntimeException failure) { session.pending = previous; throw failure; }
+            } catch (RuntimeException failure) {
+                session.pending = previous;
+                throw failure;
+            }
         }
     }
 
     public static final class BlueprintRequirement {
         public final ItemStack stack;
         public final long required, missing;
+
         public BlueprintRequirement(ItemStack stack, long required, long missing) {
-            this.stack = stack.copy(); this.required = required; this.missing = missing;
+            this.stack = stack.copy();
+            this.required = required;
+            this.missing = missing;
         }
     }
 
@@ -3806,37 +5327,70 @@ public final class CloudworksPlayerDataManager {
 
     private List<BlueprintRequirement> requirements(CloudworksLineEditSession session, CloudworksLineDraft group) {
         CloudworksMachineCache cache = machineCache(session.owner);
-        return CloudworksBlueprintShortages.requirements(group, session.current, cache, reservationLines(session.owner, cache));
+        List<BlueprintRequirement> result = new ArrayList<>(CloudworksBlueprintShortages.requirements(
+                group, session.current, cache, reservationLines(session.owner, cache)));
+        CloudworksData cloud = requireEnabled(session.owner);
+        ProductionLineData line = owned(session.owner, session.line);
+        Map<ResourceLocation, Long> assigned = CloudworksUpgradeLimits
+                .draftCustomAssignments(session.current.machines);
+        for (Map.Entry<ResourceLocation, Long> entry : CloudworksUpgradeLimits
+                .draftCustomAssignments(group.machines).entrySet()) {
+            MachineModuleType type =
+                    CloudworksMachineModuleRegistry.type(entry.getKey());
+            if (type == null || type.slot() != MachineModuleType.Slot.CUSTOM)
+                throw error("node_upgrade_invalid");
+            long available = CloudworksUpgradeLimits.availableCustom(
+                    cloud.customUpgradePool().count(entry.getKey()), line.customUpgradePool().count(entry.getKey()),
+                    assigned.getOrDefault(entry.getKey(), 0L));
+            result.add(new BlueprintRequirement(type.item(), entry.getValue(), Math.max(0, entry.getValue() - available)));
+        }
+        return result;
     }
 
-    public boolean fillBlueprint(CloudworksLineEditSession session, boolean cancel, int dimension) {
-        if (parent == null) return domain(session.owner).fillBlueprint(session, cancel, dimension);
+    private static void coverBlueprintUpgrades(CloudworksLineDraft draft) {
+        // Native per-node assignments retired (axis-priority batch 3c); custom
+        // module coverage is computed through the custom requirement loop.
+    }
+
+    public boolean fillBlueprint(CloudworksLineEditSession session, boolean cancel) {
+        if (parent == null) return domain(session.owner).fillBlueprint(session, cancel);
         synchronized (this) {
             requireEdit(session);
             CloudworksPendingBlueprint waiting = session.pending;
             if (waiting == null) throw error("not_found");
-            if (!cancel && blueprintRequirements(session).stream().anyMatch(requirement -> requirement.missing > 0)) return false;
+            if (!cancel && blueprintRequirements(session).stream().anyMatch(requirement -> requirement.missing > 0))
+                return false;
             CloudworksLineDraft next = CloudworksLineDraftCodec.copy(session.current);
             if (cancel) CloudworksDraftGeometry.remove(next, waiting.nodes());
             else {
                 Map<UUID, CloudworksLineDraft.Machine> desired = new HashMap<>();
                 waiting.placed().machines.forEach(machine -> desired.put(machine.id, machine));
-                for (CloudworksLineDraft.Machine machine : next.machines) if (waiting.id.equals(machine.waiting)) {
-                    CloudworksLineDraft.Machine original = desired.get(machine.id);
-                    if (original == null) throw error("editor");
-                    machine.count = original.count; machine.active = original.active; machine.waiting = null;
-                    machine.required = machine.missing = 0;
-                }
+                for (CloudworksLineDraft.Machine machine : next.machines)
+                    if (waiting.id.equals(machine.waiting)) {
+                        CloudworksLineDraft.Machine original = desired.get(machine.id);
+                        if (original == null) throw error("editor");
+                        machine.count = original.count;
+                        machine.active = original.active;
+                        machine.waiting = null;
+                        machine.waitingMechanism = "";
+                        machine.assignedCustom.clear();
+                        machine.assignedCustom.putAll(original.assignedCustom);
+                        machine.required = machine.missing = 0;
+                    }
                 for (CloudworksLineDraft.Channel channel : next.channels)
                     if (waiting.id.equals(channel.waiting)) channel.waiting = null;
             }
             session.pending = null;
             try {
+                if (!cancel) coverBlueprintUpgrades(next);
                 normalizeUpgradeLimits(next);
                 validateEditorDraft(session, next);
-                commitLineEdit0(session, next, dimension, false);
+                commitLineEdit0(session, next, false);
                 session.current = next;
-            } catch (RuntimeException failure) { session.pending = waiting; throw failure; }
+            } catch (RuntimeException failure) {
+                session.pending = waiting;
+                throw failure;
+            }
             return true;
         }
     }
@@ -3844,7 +5398,8 @@ public final class CloudworksPlayerDataManager {
     private void requireEdit(CloudworksLineEditSession session) {
         if (session == null || activeEdits.get(session.token) != session) throw error("stale");
         ProductionLineData line = owned(session.owner, session.line);
-        if (line == null || line.enabled() || !session.baseline.equals(structuralLine(line.write()))) throw error("stale");
+        if (line == null || line.enabled() || !session.baseline.equals(structuralLine(line.write())))
+            throw error("stale");
     }
 
     private boolean cancelMissingPending(UUID owner, ProductionLineData line) {
@@ -3853,10 +5408,12 @@ public final class CloudworksPlayerDataManager {
         Set<UUID> present = new HashSet<>();
         line.machines().forEach(node -> present.add(node.nodeId()));
         line.channels().forEach(node -> present.add(node.id()));
+        line.auxiliaries().forEach(node -> present.add(node.nodeId()));
         Set<UUID> waiting = pending.nodes();
         if (present.containsAll(waiting)) return false;
         line.machines().removeIf(node -> waiting.contains(node.nodeId()));
         line.channels().removeIf(node -> waiting.contains(node.id()));
+        line.auxiliaries().removeIf(node -> waiting.contains(node.nodeId()));
         line.links().removeIf(link -> waiting.contains(link.sourceNode()) || waiting.contains(link.targetNode()));
         return true;
     }
@@ -3865,34 +5422,46 @@ public final class CloudworksPlayerDataManager {
         Set<UUID> ids = new HashSet<>();
         draft.machines.forEach(machine -> ids.add(machine.id));
         draft.channels.forEach(channel -> ids.add(channel.id));
+        draft.auxiliaries.forEach(auxiliary -> ids.add(auxiliary.id));
         return ids;
     }
 
     private static void normalizeUpgradeLimits(CloudworksLineDraft draft) {
-        draft.maxSpeed = mekanism.cloudworks.common.upgrade.CloudworksUpgradeLimits.capacity(
-                mekanism.common.Upgrade.SPEED, draft.machines.stream().mapToLong(machine -> machine.count));
-        draft.maxEnergy = mekanism.cloudworks.common.upgrade.CloudworksUpgradeLimits.capacity(
-                mekanism.common.Upgrade.ENERGY, draft.machines.stream().mapToLong(machine -> machine.count));
-        draft.speed = Math.min(draft.speed, draft.maxSpeed); draft.energy = Math.min(draft.energy, draft.maxEnergy);
+        CloudworksUpgradeLimits.normalizeDraft(draft);
+        draft.maxSpeed = CloudworksUpgradeLimits.draftCapacity(
+                Upgrade.SPEED, draft.machines);
+        draft.maxEnergy = CloudworksUpgradeLimits.draftCapacity(
+                Upgrade.ENERGY, draft.machines);
+        draft.speed = Math.min(draft.speed, draft.maxSpeed);
+        draft.energy = Math.min(draft.energy, draft.maxEnergy);
     }
 
     private void validateEditorDraft(CloudworksLineEditSession session, CloudworksLineDraft draft) {
         requireEdit(session);
         if (draft == null || !session.line.equals(draft.line)) throw error("editor");
+        if (draft.nodeBufferMultiplier < 1
+                || draft.nodeBufferMultiplier > CloudworksConfig.settings().maxLineBufferMultiplier)
+            throw error("line_capacity_max");
         checkedName(draft.name);
         CloudworksData cloud = requireEnabled(session.owner);
         ProductionLineData existing = owned(session.owner, session.line);
-        int limit = Math.min(cloud.maxMachineNodes(), mekanism.cloudworks.common.config.CloudworksConfig.settings().maxMachineNodes);
-        if (draft.machines.size() > Math.max(limit, existing.machines().size())) throw error("node_limit");
+        int limit = Math.min(cloud.maxMachineNodes(), CloudworksConfig.settings().maxMachineNodes);
+        if (draft.machines.size() + draft.auxiliaries.size()
+                > Math.max(limit, existing.machines().size() + existing.auxiliaries().size()))
+            throw error("node_limit");
         Set<UUID> ids = new HashSet<>(), waitingIds = session.pending == null ? Collections.emptySet() : session.pending.nodes();
         Map<UUID, CloudworksLineDraft.Machine> before = new HashMap<>();
         session.current.machines.forEach(machine -> before.put(machine.id, machine));
+        Map<UUID, MachineNodeData> persistedNodes = new HashMap<>();
+        existing.machines().forEach(machine -> persistedNodes.put(machine.nodeId(), machine));
         Map<UUID, CloudworksLineDraft.Machine> pendingMachines = new HashMap<>();
-        if (session.pending != null) session.pending.placed().machines.forEach(machine -> pendingMachines.put(machine.id, machine));
-        Map<mekanism.cloudworks.common.registry.MachineKey, Long> claims = new HashMap<>();
+        if (session.pending != null)
+            session.pending.placed().machines.forEach(machine -> pendingMachines.put(machine.id, machine));
+        Map<MachineKey, Long> claims = new HashMap<>();
         CloudworksMachineCache cache = machineCache(session.owner);
         for (CloudworksLineDraft.Machine machine : draft.machines) {
-            CloudworksBlueprint.coordinate(machine.x); CloudworksBlueprint.coordinate(machine.y);
+            CloudworksBlueprint.coordinate(machine.x);
+            CloudworksBlueprint.coordinate(machine.y);
             if (machine.id == null || !ids.add(machine.id) || !CloudworksRegistries.isRegistered(machine.type)
                     || machine.count < 0 || (machine.count == 0) != (machine.waiting != null)) throw error("editor");
             if (waitingIds.contains(machine.id) != (machine.waiting != null)
@@ -3903,12 +5472,37 @@ public final class CloudworksPlayerDataManager {
                 if (desired == null) throw error("editor");
                 machine.required = desired.count;
                 machine.missing = Math.min(machine.required, Math.max(0, machine.missing));
-            } else machine.required = machine.missing = 0;
+                machine.waitingMechanism = CloudworksNodeMechanisms.activeId(desired);
+            } else {
+                machine.required = machine.missing = 0;
+                machine.waitingMechanism = "";
+            }
             CloudworksLineDraft.Machine original = before.get(machine.id);
-            if (original != null && (!CloudworksRegistries.identityKey(original.type).equals(CloudworksRegistries.identityKey(machine.type))
-                    || original.dimension != machine.dimension)) throw error("machine");
-            long maximum = mekanism.cloudworks.common.config.CloudworksConfig.settings().maxMachinesPerNode;
-            if (machine.count > maximum && (original == null || machine.count > original.count)) throw error("machine_count_limit");
+            if (mekanism.cloudworks.common.recipe.CloudworksFusionNodeContracts.isController(machine.type))
+                mekanism.cloudworks.common.recipe.CloudworksFusionNodeContracts.validateInjection(machine.fusionInjectionRate);
+            else if (machine.fusionInjectionRate != 2) throw error("fusion_injection_invalid");
+            if (original == null || !original.oreRules.equals(machine.oreRules)) validateOreRules(machine);
+            if (!CloudworksRegistries.acceptsRecipeType(machine.type, machine.recipeType)
+                    && (original == null || !Objects.equals(original.recipeType, machine.recipeType)))
+                throw error("recipe_type");
+            if (original != null && !CloudworksRegistries.identityKey(original.type).equals(
+                    CloudworksRegistries.identityKey(machine.type))) throw error("machine");
+            long maximum = CloudworksConfig.settings().maxMachinesPerNode;
+            if (machine.count > maximum && (original == null || machine.count > original.count))
+                throw error("machine_count_limit");
+            for (Map.Entry<String, Long> entry : machine.assignedCustom.entrySet()) {
+                ResourceLocation customId;
+                try {
+                    customId = new ResourceLocation(entry.getKey());
+                } catch (Exception invalid) {
+                    throw error("node_upgrade_invalid");
+                }
+                long previous = original == null ? 0 : original.assignedCustom(entry.getKey());
+                if (entry.getValue() <= 0 || entry.getValue() > CloudworksUpgradeLimits
+                        .draftCustomCapacity(machine, customId) && entry.getValue() > previous)
+                    throw error("node_upgrade_invalid");
+            }
+            CloudworksNodeMechanisms.validateChange(persistedNodes.get(machine.id), machine, draft.links);
             int type = cache.typeIndex(machine.type);
             if (machine.count > 0) {
                 if (type < 0) throw error("machine_unavailable");
@@ -3916,12 +5510,28 @@ public final class CloudworksPlayerDataManager {
             }
         }
         for (CloudworksLineDraft.Channel channel : draft.channels) {
-            CloudworksBlueprint.coordinate(channel.x); CloudworksBlueprint.coordinate(channel.y);
+            CloudworksBlueprint.coordinate(channel.x);
+            CloudworksBlueprint.coordinate(channel.y);
             if (channel.id == null || !ids.add(channel.id) || channel.mode == null) throw error("editor");
+            if (channel.archetypeId == null) channel.archetypeId = "";
+            if (!channel.archetypeId.isEmpty()) {
+                CloudworksSpecialNodeArchetype archetype =
+                        CloudworksSpecialNodeArchetypes.get(channel.archetypeId);
+                if (archetype == null || archetype.source() != channel.mode.input())
+                    throw error("special_node_invalid");
+                // 9.1 deepening: the archetype's configuration validator runs on the
+                // manager lock at commit; a refusal rejects the whole edit.
+                try {
+                    archetype.validateConfig(channel.config);
+                } catch (RuntimeException refused) {
+                    throw error("special_node_invalid");
+                }
+                validateSpecialNodeChannel(session.owner, channel, false);
+            }
             if (waitingIds.contains(channel.id) != (channel.waiting != null)
                     || channel.waiting != null && (session.pending == null || !channel.waiting.equals(session.pending.id)))
                 throw error("editor");
-            Set<mekanism.api.qio.resource.QIOResourceDescriptor> resources = new HashSet<>();
+            Set<QIOResourceDescriptor> resources = new HashSet<>();
             long sum = 0;
             for (CloudworksLineDraft.Resource resource : channel.resources) {
                 if (resource.amount <= 0 || resource.descriptor == null || !resource.descriptor.isResolved()
@@ -3929,37 +5539,135 @@ public final class CloudworksPlayerDataManager {
                 sum = Math.addExact(sum, resource.amount);
             }
         }
+        for (CloudworksLineDraft.Auxiliary auxiliary : draft.auxiliaries) {
+            CloudworksBlueprint.coordinate(auxiliary.x);
+            CloudworksBlueprint.coordinate(auxiliary.y);
+            if (auxiliary.id == null || !ids.add(auxiliary.id)
+                    || CloudworksAuxiliaryNodeRegistry.byItem(auxiliary.type) == null
+                    || auxiliary.range < 0 || auxiliary.range > 1_000_000)
+                throw error("auxiliary_node_invalid");
+            Set<UUID> targets = new HashSet<>();
+            for (UUID target : auxiliary.targets)
+                if (target == null || !targets.add(target) || !draft.machines.stream().anyMatch(machine -> target.equals(machine.id)))
+                    throw error("auxiliary_node_invalid");
+            Set<QIOResourceDescriptor> resources = new HashSet<>();
+            long total = 0;
+            for (CloudworksLineDraft.Resource resource : auxiliary.resources) {
+                if (resource.descriptor == null || !resource.descriptor.isResolved()
+                        || resource.amount <= 0 || !resources.add(resource.descriptor))
+                    throw error("auxiliary_node_invalid");
+                total = Math.addExact(total, resource.amount);
+            }
+            if (total > 10_000) throw error("auxiliary_node_invalid");
+            int type = cache.typeIndex(auxiliary.type);
+            if (type < 0) throw error("machine_unavailable");
+            claims.merge(CloudworksRegistries.identityKey(auxiliary.type), 1L, Math::addExact);
+        }
+        validateSpecialNodePermissions(session.owner, session.line, draft, false);
         Set<UUID> wires = new HashSet<>();
         for (CloudworksLineDraft.Wire wire : draft.links)
             if (!wires.add(wire.id) || !ids.contains(wire.source) || !ids.contains(wire.target)
                     || !Double.isFinite(wire.ratio) || wire.ratio < 0 || wire.ratio > 1
                     || wire.filters.stream().anyMatch(resource -> resource == null || !resource.isResolved())
-                    || new HashSet<>(wire.filters).size() != wire.filters.size()) throw error("editor_link_data_invalid");
+                    || new HashSet<>(wire.filters).size() != wire.filters.size())
+                throw error("editor_link_data_invalid");
         if (draft.markers.size() > 25 || new HashSet<>(draft.markers).size() != draft.markers.size()
-                || draft.markers.stream().anyMatch(resource -> resource == null || !resource.isResolved())) throw error("editor");
+                || draft.markers.stream().anyMatch(resource -> resource == null || !resource.isResolved()))
+            throw error("editor");
         for (ProductionLineData line : reservationLines(session.owner, cache)) {
             if (line.lineId().equals(session.line)) continue;
             for (MachineNodeData machine : line.machines()) {
                 int type = cache.typeIndex(machine.machine());
-                if (type >= 0) claims.merge(CloudworksRegistries.identityKey(machine.machine()), machine.machineCount(), Math::addExact);
+                if (type >= 0)
+                    claims.merge(CloudworksRegistries.identityKey(machine.machine()), machine.machineCount(), Math::addExact);
+            }
+            for (CloudworksAuxiliaryNodeData auxiliary : line.auxiliaries()) {
+                int type = cache.typeIndex(auxiliary.type());
+                if (type >= 0) claims.merge(CloudworksRegistries.identityKey(auxiliary.type()), 1L, Math::addExact);
             }
         }
-        Map<mekanism.cloudworks.common.registry.MachineKey, Long> holdings = CloudworksBlueprintShortages.holdings(cache);
-        for (Map.Entry<mekanism.cloudworks.common.registry.MachineKey, Long> claim : claims.entrySet())
+        Map<MachineKey, Long> holdings = CloudworksBlueprintShortages.holdings(cache);
+        for (Map.Entry<MachineKey, Long> claim : claims.entrySet())
             if (claim.getValue() > holdings.getOrDefault(claim.getKey(), 0L)) throw error("machine_unavailable");
         CloudworksTopologyValidator.Result topology = validateEditorTopology(session.owner, draft);
         if (!topology.valid()) throw error(topology.errorKey());
-        int maxSpeed = mekanism.cloudworks.common.upgrade.CloudworksUpgradeLimits.capacity(
-                mekanism.common.Upgrade.SPEED, draft.machines.stream().mapToLong(machine -> machine.count));
-        int maxEnergy = mekanism.cloudworks.common.upgrade.CloudworksUpgradeLimits.capacity(
-                mekanism.common.Upgrade.ENERGY, draft.machines.stream().mapToLong(machine -> machine.count));
+        int maxSpeed = CloudworksUpgradeLimits.draftCapacity(
+                Upgrade.SPEED, draft.machines);
+        int maxEnergy = CloudworksUpgradeLimits.draftCapacity(
+                Upgrade.ENERGY, draft.machines);
         if (draft.speed < 0 || draft.energy < 0 || draft.speed > Math.max(maxSpeed, existing.speedUpgrades())
                 || draft.energy > Math.max(maxEnergy, existing.energyUpgrades())
                 || draft.speed - existing.speedUpgrades() > cloud.upgradePool(true)
                 || draft.energy - existing.energyUpgrades() > cloud.upgradePool(false)) throw error("pool_empty");
+        for (Map.Entry<ResourceLocation, Long> entry : CloudworksUpgradeLimits
+                .draftCustomAssignments(draft.machines).entrySet())
+            if (entry.getValue() > existing.customUpgradePool().count(entry.getKey())
+                    && entry.getValue() - existing.customUpgradePool().count(entry.getKey())
+                    > cloud.customUpgradePool().count(entry.getKey())) throw error("pool_empty");
         draft.maxNodes = limit;
-        draft.maxMachinesPerNode = mekanism.cloudworks.common.config.CloudworksConfig.settings().maxMachinesPerNode;
-        draft.maxSpeed = maxSpeed; draft.maxEnergy = maxEnergy;
+        draft.maxMachinesPerNode = CloudworksConfig.settings().maxMachinesPerNode;
+        draft.maxSpeed = maxSpeed;
+        draft.maxEnergy = maxEnergy;
+    }
+
+    private void validateSpecialNodeChannel(UUID owner, CloudworksLineDraft.Channel channel,
+                                            boolean requireResource) {
+        if (CloudworksNodeEnvironment.source(channel.archetypeId)) {
+            if (channel.mode != CloudworksChannelNode.Mode.RECEIVE_INPUT || !channel.resources.isEmpty()
+                    || !channel.config.isEmpty()) throw error("special_node_invalid");
+            return;
+        }
+        if (!CloudworksSpecialNodeArchetypes.INFINITE_RESOURCES.toString().equals(channel.archetypeId))
+            throw error("special_node_invalid");
+        if (channel.mode != CloudworksChannelNode.Mode.RECEIVE_INPUT) throw error("special_node_invalid");
+        CloudworksSpecialNodeStore.Snapshot specialNodes = specialNodeStore(owner).load();
+        if (!specialNodes.available) throw error("special_node_resource_unavailable");
+        if (channel.resources.size() > 1) throw error("special_node_resource_count");
+        if (channel.resources.isEmpty()) {
+            if (requireResource) throw error("special_resource_required");
+            return;
+        }
+        CloudworksLineDraft.Resource selected = channel.resources.get(0);
+        CloudworksSpecialNodeStore.Entry entry = specialNodes.resources.get(selected.descriptor);
+        if (entry == null) throw error("special_node_resource_unavailable");
+        // Source manifests store the selection only. Rates always come from the owner's resource file.
+        selected.amount = 1;
+    }
+
+    private void validateSpecialNodePermissions(UUID owner, UUID lineId, CloudworksLineDraft draft,
+                                                boolean requireSelected) {
+        CloudworksSpecialNodeStore.Snapshot specialNodes = specialNodeStore(owner).load();
+        Map<QIOResourceDescriptor, Long> counts = new HashMap<>();
+        Map<String, Long> environmentCounts = new HashMap<>();
+        for (CloudworksLineDraft.Channel channel : draft.channels) {
+            if (channel.archetypeId.isEmpty()) continue;
+            validateSpecialNodeChannel(owner, channel, requireSelected);
+            if (CloudworksNodeEnvironment.source(channel.archetypeId)) {
+                environmentCounts.merge(channel.archetypeId, 1L, Math::addExact);
+                continue;
+            }
+            if (!channel.resources.isEmpty())
+                counts.merge(channel.resources.get(0).descriptor, 1L, Math::addExact);
+        }
+        for (ProductionLineData other : lines(owner)) {
+            if (other.lineId().equals(lineId)) continue;
+            for (CloudworksChannelNode channel : other.channels()) {
+                if (CloudworksNodeEnvironment.source(channel.archetypeId()))
+                    environmentCounts.merge(channel.archetypeId(), 1L, Math::addExact);
+                else if (CloudworksSpecialNodeArchetypes.INFINITE_RESOURCES.toString().equals(channel.archetypeId()))
+                    for (QIOResourceDescriptor resource : channel.resources().keySet())
+                        counts.merge(resource, 1L, Math::addExact);
+            }
+        }
+        for (Map.Entry<String, Long> environment : environmentCounts.entrySet())
+            if (environment.getValue() > CloudworksNodeEnvironment.quota(
+                    requireEnabled(owner), environment.getKey())) throw error("special_node_limit");
+        for (Map.Entry<QIOResourceDescriptor, Long> count : counts.entrySet()) {
+            CloudworksSpecialNodeStore.Entry entry = specialNodes.resources.get(count.getKey());
+            if (entry == null) continue;
+            if (!entry.rules.unlimitedPlacement && count.getValue() > entry.rules.nodeLimit)
+                throw error("special_node_limit");
+        }
     }
 
     private static CloudworksTopologyValidator.Result validateEditorTopology(UUID owner, CloudworksLineDraft draft) {
@@ -3969,18 +5677,35 @@ public final class CloudworksPlayerDataManager {
             MachineNodeData node = new MachineNodeData(value.id, value.type, value.x, value.y);
             node.setMachineCount(value.count);
             node.setActive(value.active);
+            node.setRecipeType(value.recipeType);
+            node.setOreRules(value.oreRules);
+            node.setFusionInjectionRate(value.fusionInjectionRate);
+            CloudworksNodeMechanisms.applyAssignments(value, node);
             node.setWaitingBlueprint(value.waiting);
             node.setWaitingCount(value.required);
+            node.setWaitingMechanism(value.waitingMechanism);
             line.machines().add(node);
         }
         for (CloudworksLineDraft.Channel value : draft.channels) {
-            CloudworksChannelNode node = new CloudworksChannelNode(value.id, value.mode, Long.MAX_VALUE);
+            CloudworksChannelNode node = new CloudworksChannelNode(value.id, value.mode, Long.MAX_VALUE, value.archetypeId);
             node.setPosition(value.x, value.y);
             node.setEnabled(value.active);
             node.setWaitingBlueprint(value.waiting);
+            node.setConfig(value.config);
             for (CloudworksLineDraft.Resource resource : value.resources)
                 node.setResource(resource.descriptor, resource.amount);
             line.channels().add(node);
+        }
+        for (CloudworksLineDraft.Auxiliary value : draft.auxiliaries) {
+            CloudworksAuxiliaryNodeData node =
+                    new CloudworksAuxiliaryNodeData(
+                            value.id, value.type, value.x, value.y);
+            node.setRange(value.range);
+            node.setActive(value.active);
+            node.setLinkedTargets(value.targets);
+            for (CloudworksLineDraft.Resource resource : value.resources)
+                node.input().insertIgnoringTypeCap(resource.descriptor, resource.amount);
+            line.auxiliaries().add(node);
         }
         for (CloudworksLineDraft.Wire value : draft.links) {
             ProductionLineLink link = new ProductionLineLink(value.id, value.source, value.sourcePort,
@@ -3994,7 +5719,15 @@ public final class CloudworksPlayerDataManager {
         return CloudworksTopologyValidator.validate(line);
     }
 
-    /** Unexpected container closure discards only the local edit, never replays its initial configuration. */
+    private static void validateOreRules(CloudworksLineDraft.Machine value) {
+        if (!value.oreRules.isEmpty() && !mekanism.cloudworks.common.recipe.CloudworksOredictionificator.isMachine(value.type))
+            throw new IllegalArgumentException("cloudworks.error.ore_rule_invalid");
+        mekanism.cloudworks.common.recipe.CloudworksOredictionificator.validate(value.oreRules);
+    }
+
+    /**
+     * Unexpected container closure discards only the local edit, never replays its initial configuration.
+     */
     public boolean abortLineEdit(CloudworksLineEditSession session) {
         if (session == null) return false;
         if (parent == null) {
@@ -4013,166 +5746,245 @@ public final class CloudworksPlayerDataManager {
     }
 
     public void commitLineEdit(CloudworksLineEditSession session,
-            mekanism.cloudworks.common.network.data.CloudworksLineDraft draft, int dimension) {
+                               CloudworksLineDraft draft) {
         if (session == null) return;
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(session.owner);
-            target.commitLineEdit(session, draft, dimension);
+            target.commitLineEdit(session, draft);
             return;
         }
         synchronized (this) {
-            commitLineEdit0(session, draft, dimension, true);
+            commitLineEdit0(session, draft, true);
         }
     }
 
-    private void commitLineEdit0(CloudworksLineEditSession session, CloudworksLineDraft draft, int dimension, boolean finish) {
-            if (activeEdits.get(session.token) != session || !session.line.equals(draft.line)) throw error("stale");
-            validateEditorDraft(session, draft);
-            UUID owner = session.owner;
-            ProductionLineData current = owned(owner, session.line);
-            if (current == null || current.enabled()
-                    || !session.baseline.equals(structuralLine(current.write()))) throw error("stale");
-            if (draft.markers.size() > 25 || new HashSet<>(draft.markers).size() != draft.markers.size())
+    private void commitLineEdit0(CloudworksLineEditSession session, CloudworksLineDraft draft, boolean finish) {
+        if (activeEdits.get(session.token) != session || !session.line.equals(draft.line)) throw error("stale");
+        validateEditorDraft(session, draft);
+        UUID owner = session.owner;
+        ProductionLineData current = owned(owner, session.line);
+        if (current == null || current.enabled()
+                || !session.baseline.equals(structuralLine(current.write()))) throw error("stale");
+        if (draft.markers.size() > 25 || new HashSet<>(draft.markers).size() != draft.markers.size())
+            throw error("editor");
+        ProductionLineData next = ProductionLineData.read(current.write());
+        CloudworksData cloud = CloudworksData.read(requireEnabled(owner).write());
+        if (draft.runWhileOwnerOffline && !cloud.offlineProcessingUnlocked()) throw error("offline_locked");
+        if (draft.runWhileOwnerOffline && !current.runWhileOwnerOffline()
+                && !CloudworksConfig.settings().offlineProcessingEnabled)
+            throw error("offline_disabled");
+        CloudworksRecycleBin bin = CloudworksRecycleBin.read(recycleBin(owner).write());
+        int nodeLimit = Math.min(cloud.maxMachineNodes(),
+                CloudworksConfig.settings().maxMachineNodes);
+        if (draft.machines.size() + draft.auxiliaries.size()
+                > Math.max(nodeLimit, current.machines().size() + current.auxiliaries().size()))
+            throw error("node_limit");
+        settleNodeCustomUpgrades(cloud, next,
+                CloudworksUpgradeLimits.draftCustomAssignments(draft.machines));
+        CloudworksMachineCache cache = machineCache(owner);
+        Map<UUID, MachineNodeData> oldMachines = new HashMap<>();
+        for (MachineNodeData machine : next.machines()) oldMachines.put(machine.nodeId(), machine);
+        Map<UUID, CloudworksChannelNode> oldChannels = new HashMap<>();
+        for (CloudworksChannelNode channel : next.channels())
+            oldChannels.put(channel.id(), channel);
+        Map<UUID, CloudworksAuxiliaryNodeData> oldAuxiliaries = new HashMap<>();
+        for (CloudworksAuxiliaryNodeData auxiliary : next.auxiliaries())
+            oldAuxiliaries.put(auxiliary.nodeId(), auxiliary);
+        Map<UUID, ProductionLineLink> oldLinks = new HashMap<>();
+        for (ProductionLineLink link : next.links()) oldLinks.put(link.linkId(), link);
+        next.machines().clear();
+        next.channels().clear();
+        next.auxiliaries().clear();
+        next.links().clear();
+        Set<UUID> ids = new HashSet<>();
+        Map<Integer, Long> wanted = new HashMap<>();
+        for (CloudworksLineDraft.Machine value : draft.machines) {
+            if (!ids.add(value.id) || value.count < 0 || value.count == 0 && value.waiting == null
+                    || oldChannels.containsKey(value.id)) throw error("editor");
+            int type = cache.typeIndex(value.type);
+            if (value.count > 0 && type < 0 || !CloudworksRegistries.isRegistered(value.type)) throw error("machine");
+            MachineNodeData node = oldMachines.remove(value.id);
+            if (value.count > CloudworksConfig.settings().maxMachinesPerNode
+                    && (node == null || value.count > node.machineCount())) throw error("machine_count_limit");
+            if (node != null && !CloudworksRegistries.identityKey(node.machine())
+                    .equals(CloudworksRegistries.identityKey(value.type))) throw error("machine");
+            if (node == null) {
+                node = new MachineNodeData(value.id, value.type, value.x, value.y);
+                node.setPooledClaim(true);
+            } else if (node.machineCount() != value.count) {
+                node.cancelOperation();
+                node.setProgress(0, 1);
+                node.setPooledClaim(true);
+            }
+            CloudworksThermalPlan previousThermal = node.capabilities().thermal();
+            node.setMachineCount(value.count);
+            node.setWaitingBlueprint(value.waiting);
+            node.setWaitingCount(value.required);
+            node.setWaitingMechanism(value.waitingMechanism);
+            node.setPosition(value.x, value.y);
+            node.setActive(value.active && value.count > 0);
+            node.setRecipeType(value.recipeType);
+            node.setOreRules(value.oreRules);
+            node.setFusionInjectionRate(value.fusionInjectionRate);
+            boolean customChanged = node.customUpgrades().size() != value.assignedCustom.size();
+            if (!customChanged) for (Map.Entry<String, Long> entry : value.assignedCustom.entrySet())
+                if (node.customUpgrades().count(new ResourceLocation(entry.getKey())) != entry.getValue()) {
+                    customChanged = true;
+                    break;
+                }
+            if (customChanged) {
+                node.cancelOperation();
+                node.setProgress(0, 1);
+                Map<ResourceLocation, Long> converted = new LinkedHashMap<>();
+                for (Map.Entry<String, Long> entry : value.assignedCustom.entrySet())
+                    converted.put(new ResourceLocation(entry.getKey()), entry.getValue());
+                node.customUpgrades().setAll(converted);
+            }
+            CloudworksThermalPlan nextThermal = node.capabilities().thermal();
+            boolean sameFusionReservoirs = mekanism.cloudworks.common.recipe.CloudworksFusionNodeContracts.isController(node.machine())
+                    && previousThermal != null && nextThermal != null
+                    && previousThermal.kind == CloudworksThermalPlan.Kind.FUSION && nextThermal.kind == CloudworksThermalPlan.Kind.FUSION
+                    && previousThermal.capacity == nextThermal.capacity && previousThermal.plasmaCapacity == nextThermal.plasmaCapacity;
+            if (nextThermal != previousThermal && !sameFusionReservoirs) node.setThermalState(null);
+            next.machines().add(node);
+            if (value.count > 0) wanted.merge(type, value.count, Math::addExact);
+        }
+        for (CloudworksLineDraft.Auxiliary value : draft.auxiliaries) {
+            int type = cache.typeIndex(value.type);
+            if (type < 0) throw error("machine_unavailable");
+            wanted.merge(type, 1L, Math::addExact);
+        }
+        for (ProductionLineData other : lines(owner)) {
+            if (other.lineId().equals(next.lineId())) continue;
+            for (MachineNodeData node : other.machines()) {
+                int type = cache.typeIndex(node.machine());
+                if (type >= 0) wanted.merge(type, node.machineCount(), Math::addExact);
+            }
+            for (CloudworksAuxiliaryNodeData auxiliary : other.auxiliaries()) {
+                int type = cache.typeIndex(auxiliary.type());
+                if (type >= 0) wanted.merge(type, 1L, Math::addExact);
+            }
+        }
+        List<CloudworksMachineCache.Entry> entries = cache.entries();
+        for (Map.Entry<Integer, Long> demand : wanted.entrySet())
+            if (demand.getValue() > entries.get(demand.getKey()).count()) throw error("machine_unavailable");
+        boolean discarded = false;
+        for (MachineNodeData removed : oldMachines.values()) {
+            removed.cancelOperation();
+            discarded |= recycleIntoBin(bin, removed.inputs(), removed.outputs(), removed.templates()) > 0;
+        }
+        for (CloudworksLineDraft.Channel value : draft.channels) {
+            if (!ids.add(value.id) || current.machines().stream().anyMatch(n -> n.nodeId().equals(value.id)))
                 throw error("editor");
-            ProductionLineData next = ProductionLineData.read(current.write());
-            CloudworksData cloud = CloudworksData.read(requireEnabled(owner).write());
-            if (draft.runWhileOwnerOffline && !cloud.offlineProcessingUnlocked()) throw error("offline_locked");
-            if (draft.runWhileOwnerOffline && !current.runWhileOwnerOffline()
-                    && !mekanism.cloudworks.common.config.CloudworksConfig.settings().offlineProcessingEnabled)
-                throw error("offline_disabled");
-            CloudworksRecycleBin bin = CloudworksRecycleBin.read(recycleBin(owner).write());
-            int nodeLimit = Math.min(cloud.maxMachineNodes(),
-                    mekanism.cloudworks.common.config.CloudworksConfig.settings().maxMachineNodes);
-            if (draft.machines.size() > Math.max(nodeLimit, current.machines().size())) throw error("node_limit");
-            CloudworksMachineCache cache = machineCache(owner);
-            Map<UUID, MachineNodeData> oldMachines = new HashMap<>();
-            for (MachineNodeData machine : next.machines()) oldMachines.put(machine.nodeId(), machine);
-            Map<UUID, mekanism.cloudworks.common.data.CloudworksChannelNode> oldChannels = new HashMap<>();
-            for (mekanism.cloudworks.common.data.CloudworksChannelNode channel : next.channels()) oldChannels.put(channel.id(), channel);
-            Map<UUID, ProductionLineLink> oldLinks = new HashMap<>();
-            for (ProductionLineLink link : next.links()) oldLinks.put(link.linkId(), link);
-            next.machines().clear();
-            next.channels().clear();
-            next.links().clear();
-            Set<UUID> ids = new HashSet<>();
-            Map<Integer, Long> wanted = new HashMap<>();
-            for (mekanism.cloudworks.common.network.data.CloudworksLineDraft.Machine value : draft.machines) {
-                if (!ids.add(value.id) || value.count < 0 || value.count == 0 && value.waiting == null
-                        || oldChannels.containsKey(value.id)) throw error("editor");
-                int type = cache.typeIndex(value.type);
-                if (value.count > 0 && type < 0 || !CloudworksRegistries.isRegistered(value.type)) throw error("machine");
-                MachineNodeData node = oldMachines.remove(value.id);
-                if (value.count > mekanism.cloudworks.common.config.CloudworksConfig.settings().maxMachinesPerNode
-                        && (node == null || value.count > node.machineCount())) throw error("machine_count_limit");
-                if (node != null && !ItemStack.areItemsEqual(node.machine(), value.type)) throw error("machine");
-                if (node == null) {
-                    node = new MachineNodeData(value.id, value.type, value.x, value.y);
-                    node.setDimensionId(value.dimension);
-                    node.setPooledClaim(true);
-                } else if (node.machineCount() != value.count) {
-                    node.cancelOperation();
-                    node.setProgress(0, 1);
-                    node.setPooledClaim(true);
-                }
-                node.setMachineCount(value.count);
-                node.setWaitingBlueprint(value.waiting);
-                node.setWaitingCount(value.required);
-                node.setPosition(value.x, value.y);
-                node.setActive(value.active && value.count > 0);
-                next.machines().add(node);
-                if (value.count > 0) wanted.merge(type, value.count, Math::addExact);
+            CloudworksChannelNode node = oldChannels.remove(value.id);
+            if (node != null && (node.mode() != value.mode
+                    || !Objects.equals(node.archetypeId(), value.archetypeId))) throw error("editor");
+            if (node == null) node = new CloudworksChannelNode(
+                    value.id, value.mode, Long.MAX_VALUE, value.archetypeId);
+            if (node.special())
+                for (QIOResourceDescriptor resource : node.buffer().snapshot().keySet())
+                    node.buffer().extract(resource, Long.MAX_VALUE);
+            for (QIOResourceDescriptor descriptor : new ArrayList<>(node.resources().keySet()))
+                node.setResource(descriptor, 0);
+            Set<QIOResourceDescriptor> resources = new HashSet<>();
+            for (CloudworksLineDraft.Resource resource : value.resources) {
+                if (!resources.add(resource.descriptor) || resource.amount <= 0) throw error("editor");
+                node.setResource(resource.descriptor, resource.amount);
             }
-            for (ProductionLineData other : lines(owner)) {
-                if (other.lineId().equals(next.lineId())) continue;
-                for (MachineNodeData node : other.machines()) {
-                    int type = cache.typeIndex(node.machine());
-                    if (type >= 0) wanted.merge(type, node.machineCount(), Math::addExact);
-                }
-            }
-            List<CloudworksMachineCache.Entry> entries = cache.entries();
-            for (Map.Entry<Integer, Long> demand : wanted.entrySet())
-                if (demand.getValue() > entries.get(demand.getKey()).count()) throw error("machine_unavailable");
-            boolean discarded = false;
-            for (MachineNodeData removed : oldMachines.values()) {
-                removed.cancelOperation();
-                discarded |= recycleIntoBin(bin, removed.inputs(), removed.outputs(), removed.templates()) > 0;
-            }
-            for (mekanism.cloudworks.common.network.data.CloudworksLineDraft.Channel value : draft.channels) {
-                if (!ids.add(value.id) || current.machines().stream().anyMatch(n -> n.nodeId().equals(value.id))) throw error("editor");
-                mekanism.cloudworks.common.data.CloudworksChannelNode node = oldChannels.remove(value.id);
-                if (node != null && node.mode() != value.mode) throw error("editor");
-                if (node == null) node = new mekanism.cloudworks.common.data.CloudworksChannelNode(value.id, value.mode, Long.MAX_VALUE);
-                for (mekanism.api.qio.resource.QIOResourceDescriptor descriptor : new ArrayList<>(node.resources().keySet()))
-                    node.setResource(descriptor, 0);
-                Set<mekanism.api.qio.resource.QIOResourceDescriptor> resources = new HashSet<>();
-                for (mekanism.cloudworks.common.network.data.CloudworksLineDraft.Resource resource : value.resources) {
-                    if (!resources.add(resource.descriptor) || resource.amount <= 0) throw error("editor");
-                    node.setResource(resource.descriptor, resource.amount);
-                }
-                node.setPosition(value.x, value.y);
-                node.setEnabled(value.active);
-                node.setWaitingBlueprint(value.waiting);
-                next.channels().add(node);
-            }
-            for (mekanism.cloudworks.common.data.CloudworksChannelNode removed : oldChannels.values())
-                for (Map.Entry<mekanism.api.qio.resource.QIOResourceDescriptor, Long> resource : removed.buffer().snapshot().entrySet())
-                    discarded |= bin.deposit(resource.getKey(), resource.getValue()) > 0;
-            Set<UUID> linkIds = new HashSet<>();
-            Set<String> endpoints = new HashSet<>();
-            for (mekanism.cloudworks.common.network.data.CloudworksLineDraft.Wire value : draft.links) {
-                if (!linkIds.add(value.id)) throw error("editor_duplicate_link");
-                if (!ids.contains(value.source) || !ids.contains(value.target)) throw error("editor_link_unknown_node");
-                if (!endpoints.add(value.source + "|" + value.sourcePort + "|" + value.target + "|" + value.targetPort))
-                    throw error("editor_duplicate_connection");
-                ProductionLineLink link = new ProductionLineLink(value.id, value.source, value.sourcePort, value.target, value.targetPort);
-                link.setEnabled(value.enabled);
-                link.setPriority(value.priority);
-                link.setRatio(value.ratio);
-                link.setResourceFilters(value.filters);
-                ProductionLineLink old = oldLinks.get(value.id);
-                if (old != null && old.sourceNode().equals(value.source) && old.targetNode().equals(value.target)
-                        && old.sourcePort().equals(value.sourcePort) && old.targetPort().equals(value.targetPort)
-                        && old.ratio() == value.ratio && old.resourceFilters().equals(value.filters))
-                    link.setRatioRemainder(old.ratioRemainder());
-                next.links().add(link);
-            }
-            if (draft.speed < 0 || draft.speed > next.maxSpeedUpgrades()
-                    || draft.energy < 0 || draft.energy > next.maxEnergyUpgrades()) throw error("upgrade");
-            int speedDelta = draft.speed - current.speedUpgrades(), energyDelta = draft.energy - current.energyUpgrades();
-            if (speedDelta > cloud.upgradePool(true) || energyDelta > cloud.upgradePool(false)) throw error("pool_empty");
-            cloud.addUpgradePool(true, -speedDelta);
-            cloud.addUpgradePool(false, -energyDelta);
-            next.setName(checkedName(draft.name));
-            next.setUpgrades(draft.speed, draft.energy);
-            settleLineEnergy(cloud, next, current.energy());
-            next.setEnergyFlows(draft.receivingFlow, draft.sendingFlow);
-            next.setRunWhileOwnerOffline(draft.runWhileOwnerOffline);
-            next.setExplicitRouting(draft.explicitRouting || !next.channels().isEmpty());
-            next.dynamicResourceDisplayList().clear();
-            for (mekanism.api.qio.resource.QIOResourceDescriptor marker : draft.markers) {
-                if (!marker.isResolved()) throw error("editor");
-                next.dynamicResourceDisplayList().add(marker.write().toString());
-            }
-            if (finish) {
-                CloudworksTopologyValidator.Result topology = CloudworksTopologyValidator.validate(next);
-                if (!topology.valid()) throw error(topology.errorKey());
-                if (draft.enabled && next.machines().isEmpty()) throw error("editor_active_line_requires_machine");
-            }
-            next.setEnabled(finish && draft.enabled);
-            CloudworksPendingBlueprint durablePending = pendingBlueprints.get(owner);
-            NBTTagCompound pendingWrite;
-            if (session.pending != null) pendingWrite = session.pending.write();
-            else if (durablePending != null && !durablePending.line.equals(session.line)) pendingWrite = durablePending.write();
-            else pendingWrite = CloudworksPendingBlueprint.empty();
-            publish0(owner, cloud.write(), Collections.singletonList(next.write()), bin.write(), null, null, null,
-                    true, false, pendingWrite);
-            recycleBins.put(owner, bin);
-            if (discarded) pendingRecycleOverflow.add(owner);
-            if (finish) activeEdits.remove(session.token);
-            else session.baseline = structuralLine(next.write());
+            node.setPosition(value.x, value.y);
+            node.setEnabled(value.active);
+            node.setWaitingBlueprint(value.waiting);
+            next.channels().add(node);
+        }
+        for (CloudworksChannelNode removed : oldChannels.values()) {
+            if (removed.special()) continue;
+            for (Map.Entry<QIOResourceDescriptor, Long> resource : removed.buffer().snapshot().entrySet())
+                discarded |= bin.deposit(resource.getKey(), resource.getValue()) > 0;
+        }
+        for (CloudworksLineDraft.Auxiliary value : draft.auxiliaries) {
+            if (!ids.add(value.id)) throw error("editor");
+            if (CloudworksAuxiliaryNodeRegistry.byItem(value.type) == null)
+                throw error("auxiliary_node_invalid");
+            CloudworksAuxiliaryNodeData node = oldAuxiliaries.remove(value.id);
+            if (node == null) node = new CloudworksAuxiliaryNodeData(
+                    value.id, value.type, value.x, value.y);
+            else if (!ItemStack.areItemsEqual(node.type(), value.type)
+                    || !ItemStack.areItemStackTagsEqual(node.type(), value.type))
+                throw error("auxiliary_node_invalid");
+            for (QIOResourceDescriptor resource : new ArrayList<>(node.input().snapshot().keySet()))
+                node.input().extract(resource, Long.MAX_VALUE);
+            node.setPosition(value.x, value.y);
+            node.setRange(value.range);
+            node.setActive(value.active);
+            node.setLinkedTargets(value.targets);
+            for (CloudworksLineDraft.Resource resource : value.resources)
+                node.input().insertIgnoringTypeCap(resource.descriptor, resource.amount);
+            next.auxiliaries().add(node);
+        }
+        for (CloudworksAuxiliaryNodeData removed : oldAuxiliaries.values())
+            for (Map.Entry<QIOResourceDescriptor, Long> resource : removed.input().snapshot().entrySet())
+                discarded |= bin.deposit(resource.getKey(), resource.getValue()) > 0;
+        Set<UUID> linkIds = new HashSet<>();
+        Set<String> endpoints = new HashSet<>();
+        for (CloudworksLineDraft.Wire value : draft.links) {
+            if (!linkIds.add(value.id)) throw error("editor_duplicate_link");
+            if (!ids.contains(value.source) || !ids.contains(value.target)) throw error("editor_link_unknown_node");
+            if (!endpoints.add(value.source + "|" + value.sourcePort + "|" + value.target + "|" + value.targetPort))
+                throw error("editor_duplicate_connection");
+            ProductionLineLink link = new ProductionLineLink(value.id, value.source, value.sourcePort, value.target, value.targetPort);
+            link.setEnabled(value.enabled);
+            link.setPriority(value.priority);
+            link.setRatio(value.ratio);
+            link.setResourceFilters(value.filters);
+            ProductionLineLink old = oldLinks.get(value.id);
+            if (old != null && old.sourceNode().equals(value.source) && old.targetNode().equals(value.target)
+                    && old.sourcePort().equals(value.sourcePort) && old.targetPort().equals(value.targetPort)
+                    && old.ratio() == value.ratio && old.resourceFilters().equals(value.filters))
+                link.setRatioRemainder(old.ratioRemainder());
+            next.links().add(link);
+        }
+        if (draft.speed < 0 || draft.speed > next.maxSpeedUpgrades()
+                || draft.energy < 0 || draft.energy > next.maxEnergyUpgrades()) throw error("upgrade");
+        int speedDelta = draft.speed - current.speedUpgrades(), energyDelta = draft.energy - current.energyUpgrades();
+        if (speedDelta > cloud.upgradePool(true) || energyDelta > cloud.upgradePool(false)) throw error("pool_empty");
+        cloud.addUpgradePool(true, -speedDelta);
+        cloud.addUpgradePool(false, -energyDelta);
+        next.setName(checkedName(draft.name));
+        next.setNodeBufferMultiplier(draft.nodeBufferMultiplier);
+        next.setUpgrades(draft.speed, draft.energy);
+        settleLineEnergy(cloud, next, current.energy());
+        next.setEnergyFlows(draft.receivingFlow, draft.sendingFlow);
+        next.setRunWhileOwnerOffline(draft.runWhileOwnerOffline);
+        next.setExplicitRouting(draft.explicitRouting || !next.channels().isEmpty());
+        next.dynamicResourceDisplayList().clear();
+        for (QIOResourceDescriptor marker : draft.markers) {
+            if (!marker.isResolved()) throw error("editor");
+            next.dynamicResourceDisplayList().add(marker.write().toString());
+        }
+        if (finish) {
+            validateSpecialNodePermissions(owner, session.line, draft, true);
+            CloudworksTopologyValidator.Result topology = CloudworksTopologyValidator.validate(next);
+            if (!topology.valid()) throw error(topology.errorKey());
+            if (draft.enabled && next.machines().isEmpty()) throw error("editor_active_line_requires_machine");
+        }
+        next.setEnabled(finish && draft.enabled);
+        CloudworksPendingBlueprint durablePending = pendingBlueprints.get(owner);
+        NBTTagCompound pendingWrite;
+        if (session.pending != null) pendingWrite = session.pending.write();
+        else if (durablePending != null && !durablePending.line.equals(session.line))
+            pendingWrite = durablePending.write();
+        else pendingWrite = CloudworksPendingBlueprint.empty();
+        publish0(owner, cloud.write(), Collections.singletonList(next.write()), bin.write(), null, null, null,
+                true, false, pendingWrite);
+        recycleBins.put(owner, bin);
+        if (discarded) pendingRecycleOverflow.add(owner);
+        if (finish) activeEdits.remove(session.token);
+        else session.baseline = structuralLine(next.write());
     }
 
-    /** Explicit recovery atomically clears a node and moves resources to recycle. */
+    /**
+     * Explicit recovery atomically clears a node and moves resources to recycle.
+     */
     public void returnCache(UUID owner, UUID id, UUID nodeId) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
@@ -4198,9 +6010,10 @@ public final class CloudworksPlayerDataManager {
                 node.setState("OFF");
                 node.setActive(false);
                 publishTags(owner, clouds.get(owner).write(), Collections.singletonList(line.write()), bin.write());
-                for (CloudworksLineEditSession edit : activeEdits.values()) if (edit.line.equals(id)) {
-                    edit.baseline = structuralLine(line.write());
-                }
+                for (CloudworksLineEditSession edit : activeEdits.values())
+                    if (edit.line.equals(id)) {
+                        edit.baseline = structuralLine(line.write());
+                    }
                 changed(owner);
                 if (discarded > 0) pendingRecycleOverflow.add(owner);
             } catch (RuntimeException failure) {
@@ -4215,90 +6028,6 @@ public final class CloudworksPlayerDataManager {
         CloudworksData cloud = getOrCreate(owner);
         if (!cloud.enabled()) throw error("disabled");
         return cloud;
-    }
-
-    /**
-     * Bounded GUI data: never send machine inventory, journals, or endpoint credentials.
-     */
-    public NBTTagCompound page(UUID owner, int requestedOffset) {
-        if (parent == null) {
-            CloudworksPlayerDataManager target = domain(owner);
-            return target.page(owner, requestedOffset);
-        }
-        synchronized (this) {
-            CloudworksData cloud = requireEnabled(owner);
-            NBTTagCompound tag = new NBTTagCompound();
-            int total = cloud.lineIds().size();
-            int offset = Math.max(0, Math.min(requestedOffset, Math.max(0, total - 1)));
-            offset = offset / PAGE_SIZE * PAGE_SIZE;
-            tag.setInteger("offset", offset);
-            tag.setInteger("total", total);
-            mekanism.cloudworks.common.config.CloudworksConfig.Settings settings =
-                    mekanism.cloudworks.common.config.CloudworksConfig.settings();
-            tag.setInteger("unlocked", Math.min(cloud.unlockedLines(), settings.maxLines));
-            tag.setInteger("maximum", settings.maxLines);
-            tag.setInteger("workRate", Math.min(cloud.workRate(), settings.maxWorkRate));
-            tag.setDouble("energy", cloud.energy());
-            tag.setDouble("maxEnergy", cloud.maxEnergy());
-            tag.setBoolean("unlimited", cloud.unlimitedEnergy());
-            // 能量层视图: 中继存量 + owner 级两门
-            tag.setDouble("receivingEnergy", cloud.receivingEnergy());
-            tag.setDouble("sendingEnergy", cloud.sendingEnergy());
-            tag.setDouble("receivingMaxEnergy", cloud.receivingEnergyCapacity());
-            tag.setDouble("sendingMaxEnergy", cloud.sendingEnergyCapacity());
-            tag.setBoolean("flowReceivingToCloud", cloud.energyFlowReceivingToCloud());
-            tag.setBoolean("flowCloudToSending", cloud.energyFlowCloudToSending());
-            // 升级层视图: 云端升级池
-            tag.setInteger("speedUpgradePool", cloud.upgradePool(true));
-            tag.setInteger("energyUpgradePool", cloud.upgradePool(false));
-            tag.setLong("revision", revision(owner));
-            NBTTagList entries = new NBTTagList();
-            for (int i = offset; i < Math.min(total, offset + PAGE_SIZE); i++) {
-                UUID id = cloud.lineIds().get(i);
-                ProductionLineData line = line(id);
-                NBTTagCompound entry = new NBTTagCompound();
-                entry.setString("id", id.toString());
-                entry.setBoolean("available", line != null);
-                if (line != null) {
-                    entry.setString("name", line.name().substring(0, Math.min(64, line.name().length())));
-                    entry.setBoolean("enabled", line.enabled());
-                    entry.setBoolean("deletable", canDelete(line));
-                    entry.setInteger("nodes", line.machines().size());
-                    entry.setDouble("energy", line.energy());
-                    entry.setDouble("maxEnergy", line.maxEnergy());
-                    entry.setInteger("speedUpgrades", line.speedUpgrades());
-                    entry.setInteger("energyUpgrades", line.energyUpgrades());
-                    entry.setInteger("maxSpeedUpgrades", line.maxSpeedUpgrades());
-                    entry.setInteger("maxEnergyUpgrades", line.maxEnergyUpgrades());
-                    entry.setBoolean("lineFlowReceiving", line.energyFlowReceivingToLine());
-                    entry.setBoolean("lineFlowSending", line.energyFlowLineToSending());
-                    net.minecraft.nbt.NBTTagList display = new net.minecraft.nbt.NBTTagList();
-                    int displayCount = 0;
-                    for (String value : line.dynamicResourceDisplayList()) {
-                        if (displayCount++ >= 16) break;
-                        display.appendTag(new net.minecraft.nbt.NBTTagString(value));
-                    }
-                    entry.setTag("dynamicResourceDisplayList", display);
-                    NBTTagList nodeTags = new NBTTagList();
-                    int nodeDetailCount = 0;
-                    for (MachineNodeData node : line.machines()) {
-                        if (nodeDetailCount++ >= 32) break;
-                        NBTTagCompound nodeTag = new NBTTagCompound();
-                        nodeTag.setString("id", node.nodeId().toString());
-                        nodeTag.setString("machine", net.minecraft.item.Item.REGISTRY.getNameForObject(node.machine().getItem()).toString());
-                        nodeTag.setInteger("metadata", node.machine().getMetadata());
-                        nodeTag.setInteger("count", (int) Math.min(Integer.MAX_VALUE, node.machineCount()));
-                        nodeTag.setBoolean("active", node.active());
-                        nodeTag.setString("state", node.state());
-                        nodeTags.appendTag(nodeTag);
-                    }
-                    entry.setTag("nodesDetail", nodeTags);
-                }
-                entries.appendTag(entry);
-            }
-            tag.setTag("lines", entries);
-            return tag;
-        }
     }
 
     // ------------------- machine cache & recycle bin -------------------
@@ -4322,9 +6051,38 @@ public final class CloudworksPlayerDataManager {
      */
     private void flushInternal(boolean skipFailedOwners) {
         drainInteraction();
-        for (UUID id : new ArrayList<>(runtimeUnmaterialized)) line(id);
+        // Already validated worker publications need no main-thread node decode.
+        // Keep one ordered intent per owner, including any pending warehouse delta.
+        Map<UUID, Map<UUID, NBTTagCompound>> frozen = new LinkedHashMap<>();
+        Set<UUID> savedRuntimeLines = new HashSet<>();
+        for (Map.Entry<UUID, Set<UUID>> dirtyOwner : runtimeDirtyLines.entrySet()) {
+            UUID owner = dirtyOwner.getKey();
+            if (skipFailedOwners && failedOwners.contains(owner)) continue;
+            Map<UUID, NBTTagCompound> ownerLines = new LinkedHashMap<>();
+            for (UUID id : dirtyOwner.getValue()) {
+                NBTTagCompound published;
+                if (runtimeUnmaterialized.contains(id)) published = publishedLineTag(id);
+                else {
+                    ProductionLineData materialized = lines.get(id);
+                    published = materialized == null ? null : materialized.write();
+                }
+                if (published == null) continue;
+                ownerLines.put(id, published);
+                savedRuntimeLines.add(id);
+            }
+            if (!ownerLines.isEmpty()) frozen.put(owner, ownerLines);
+        }
+        for (Map.Entry<UUID, Map<UUID, NBTTagCompound>> entry : frozen.entrySet()) {
+            UUID owner = entry.getKey();
+            Map<UUID, NBTTagCompound> pending = pendingRuntimeTags(owner);
+            pending.putAll(entry.getValue());
+            CloudworksWarehouseDelta changes = runtimeWarehouseDeltas.get(owner);
+            persistRuntimeTags(owner, clouds.get(owner).writeCore(), pending,
+                    changes == null ? new CloudworksWarehouseDelta().write() : changes.write());
+        }
         for (ProductionLineData line : lines.values())
-            if (!skipFailedOwners || !failedOwners.contains(line.owner())) writeCheckpoint(line);
+            if (!runtimeUnmaterialized.contains(line.lineId()) && !savedRuntimeLines.contains(line.lineId())
+                    && (!skipFailedOwners || !failedOwners.contains(line.owner()))) writeCheckpoint(line);
         for (CloudworksData cloud : clouds.values()) {
             if (skipFailedOwners && failedOwners.contains(cloud.owner())) continue;
             portJournal.compact(cloud.owner());
@@ -4334,7 +6092,7 @@ public final class CloudworksPlayerDataManager {
             orderedWrite(cloud.owner(), cloudFile(cloud.owner()), cloud.writeCore());
             for (CloudworksPortRecord port : ports.values())
                 if (port.owner.equals(cloud.owner()))
-                    orderedWrite(cloud.owner(), root.resolve(cloud.owner().toString()).resolve("ports")
+                    orderedWrite(cloud.owner(), ownerDirectory(cloud.owner()).resolve("ports")
                             .resolve(port.id + ".dat"), port.write());
         }
     }
@@ -4343,32 +6101,87 @@ public final class CloudworksPlayerDataManager {
         if (root == null) throw error("unavailable");
     }
 
+    /**
+     * Resolves owner-scoped storage without allowing player and team UUIDs to
+     * share a directory. Owner data is written only below the new split roots.
+     */
+    private Path ownerDirectory(UUID owner) {
+        requireLoaded();
+        boolean team = teamOwnerIds.contains(owner);
+        try {
+            if (!team && CloudworksTeamContext.registry().loaded()
+                    && CloudworksTeamContext.registry().hasTeam(owner)) {
+                teamOwnerIds.add(owner);
+                team = true;
+            }
+        } catch (RuntimeException ignored) {
+            // Bare unit-test environments may not load the team registry.
+        }
+        if (!team && Files.isDirectory(root.resolve("team").resolve(owner.toString()))) {
+            teamOwnerIds.add(owner);
+            team = true;
+        }
+        Path kindRoot = root.resolve(team ? "team" : "player");
+        Path target = kindRoot.resolve(owner.toString()).toAbsolutePath().normalize();
+        if (!target.startsWith(root.toAbsolutePath().normalize())) throw dataError(null);
+        try {
+            Files.createDirectories(kindRoot);
+        } catch (IOException failure) {
+            throw dataError(failure);
+        }
+        return target;
+    }
+
+    /**
+     * Restores team classification for dissolved estates before any owner
+     * path is resolved after a restart. The team registry can remove a team
+     * while its recovery record remains active, so that index is authoritative.
+     */
+    private void loadTeamOwnerIds() {
+        if (root == null || !Files.exists(teamRecoveryFile())) return;
+        try {
+            NBTTagList entries = read(teamRecoveryFile()).getTagList("entries", 10);
+            for (int i = 0; i < entries.tagCount(); i++) {
+                String value = entries.getCompoundTagAt(i).getString("owner");
+                if (value.isEmpty()) continue;
+                try {
+                    teamOwnerIds.add(UUID.fromString(value));
+                } catch (IllegalArgumentException ignored) {
+                    Mekanism.logger.debug(
+                            "Skipping invalid team recovery owner {}", value, ignored);
+                }
+            }
+        } catch (RuntimeException failure) {
+            throw dataError(failure);
+        }
+    }
+
     private Path cloudFile(UUID owner) {
-        return root.resolve(owner.toString()).resolve("cloud.dat");
+        return ownerDirectory(owner).resolve("cloud.dat");
     }
 
     private Path receivingFile(UUID owner) {
-        return root.resolve(owner.toString()).resolve("receiving.dat");
+        return ownerDirectory(owner).resolve("receiving.dat");
     }
 
     private Path transferStoreFile(UUID owner) {
-        return root.resolve(owner.toString()).resolve("transfer.dat");
+        return ownerDirectory(owner).resolve("transfer.dat");
     }
 
     private Path sendingFile(UUID owner) {
-        return root.resolve(owner.toString()).resolve("sending.dat");
+        return ownerDirectory(owner).resolve("sending.dat");
     }
 
     private Path lineFile(UUID owner, UUID id) {
-        return root.resolve(owner.toString()).resolve("production").resolve(id + ".dat");
+        return ownerDirectory(owner).resolve("production").resolve(id + ".dat");
     }
 
     private Path lineRuntimeFile(UUID owner, UUID id) {
-        return root.resolve(owner.toString()).resolve("production").resolve(id + ".runtime.dat");
+        return ownerDirectory(owner).resolve("production").resolve(id + ".runtime.dat");
     }
 
     private Path pendingIntentFile(UUID owner) {
-        return root.resolve(owner.toString()).resolve("transfer.pending.dat");
+        return ownerDirectory(owner).resolve("transfer.pending.dat");
     }
 
     private Path terminalFile(UUID id) {
@@ -4376,15 +6189,19 @@ public final class CloudworksPlayerDataManager {
     }
 
     private Path machineCacheFile(UUID owner) {
-        return root.resolve(owner.toString()).resolve("machine-cache.dat");
+        return ownerDirectory(owner).resolve("machine-cache.dat");
+    }
+
+    private Path specialNodeDirectory(UUID owner) {
+        return ownerDirectory(owner).resolve("special_nodes");
     }
 
     private Path blueprintPendingFile(UUID owner) {
-        return root.resolve(owner.toString()).resolve("blueprint-pending.dat");
+        return ownerDirectory(owner).resolve("blueprint-pending.dat");
     }
 
     private Path sourceDebtsFile(UUID owner) {
-        return root.resolve(owner.toString()).resolve("source-debits.dat");
+        return ownerDirectory(owner).resolve("source-debits.dat");
     }
 
     /**
@@ -4395,39 +6212,370 @@ public final class CloudworksPlayerDataManager {
     }
 
     private Path recycleFile(UUID owner) {
-        return root.resolve(owner.toString()).resolve("recycle.dat");
+        return ownerDirectory(owner).resolve("recycle.dat");
+    }
+
+    private Path teamRecoveryFile() {
+        return root.resolve("team-recovery.dat");
+    }
+
+    private Path teamRecoveryIntentFile(UUID owner) {
+        return ownerDirectory(owner).resolve("team-recovery.pending.dat");
+    }
+
+    private static NBTTagCompound recoveryEntry(UUID owner, String teamId, short teamUid,
+                                                UUID lastOwner, String status) {
+        NBTTagCompound tag = new NBTTagCompound();
+        tag.setString("owner", owner.toString());
+        tag.setString("teamId", teamId == null ? "" : teamId);
+        tag.setShort("teamUid", teamUid);
+        if (lastOwner != null) tag.setString("lastOwner", lastOwner.toString());
+        tag.setString("status", status);
+        return tag;
+    }
+
+    private TeamRecoveryRecord findTeamRecovery(UUID owner) {
+        synchronized (teamRecoveryLock) {
+            if (root == null || !Files.exists(teamRecoveryFile())) return null;
+            NBTTagList entries = read(teamRecoveryFile()).getTagList("entries", 10);
+            for (int i = 0; i < entries.tagCount(); i++) {
+                NBTTagCompound tag = entries.getCompoundTagAt(i);
+                if (!owner.toString().equals(tag.getString("owner"))) continue;
+                UUID last = null;
+                if (tag.hasKey("lastOwner", 8) && !tag.getString("lastOwner").isEmpty())
+                    last = UUID.fromString(tag.getString("lastOwner"));
+                return new TeamRecoveryRecord(owner, tag.getString("teamId"),
+                        tag.getShort("teamUid"), last, tag.getString("status"));
+            }
+            return null;
+        }
+    }
+
+    private void removeTeamRecovery(UUID owner) {
+        synchronized (teamRecoveryLock) {
+            if (root == null || !Files.exists(teamRecoveryFile())) return;
+            NBTTagCompound rootTag = read(teamRecoveryFile());
+            NBTTagList source = rootTag.getTagList("entries", 10), next = new NBTTagList();
+            for (int i = 0; i < source.tagCount(); i++)
+                if (!owner.toString().equals(source.getCompoundTagAt(i).getString("owner")))
+                    next.appendTag(source.getCompoundTagAt(i));
+            rootTag.setTag("entries", next);
+            write(teamRecoveryFile(), rootTag);
+        }
+    }
+
+    private void updateTeamRecoveryStatus(UUID owner, String status) {
+        synchronized (teamRecoveryLock) {
+            if (root == null || !Files.exists(teamRecoveryFile())) throw error("team_recovery");
+            NBTTagCompound rootTag = read(teamRecoveryFile());
+            NBTTagList entries = rootTag.getTagList("entries", 10);
+            boolean found = false;
+            for (int i = 0; i < entries.tagCount(); i++) {
+                NBTTagCompound entry = entries.getCompoundTagAt(i);
+                if (owner.toString().equals(entry.getString("owner"))) {
+                    entry.setString("status", status);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) throw error("team_recovery");
+            write(teamRecoveryFile(), rootTag);
+        }
+    }
+
+    private void deleteTeamRecoveryIntent(UUID owner) {
+        try {
+            Files.deleteIfExists(teamRecoveryIntentFile(owner));
+        } catch (IOException failure) {
+            throw dataError(failure);
+        }
+    }
+
+    private void retireRecoveredTeam(UUID owner) {
+        for (ProductionLineData line : new ArrayList<>(lines.values())) {
+            if (!owner.equals(line.owner())) continue;
+            UUID id = line.lineId();
+            lines.remove(id);
+            guiLines.remove(id);
+            runtimeLineSnapshots.remove(id);
+            runtimeUnmaterialized.remove(id);
+            checkpointGenerations.remove(id);
+            if (parent != null) parent.lineDomains.remove(id, this);
+        }
+        for (CloudworksPortRecord port : new ArrayList<>(ports.values())) {
+            if (!owner.equals(port.owner)) continue;
+            ports.remove(port.id);
+            portMounts.remove(port.id);
+            dirtyPorts.remove(port.id);
+        }
+        activeEdits.values().removeIf(edit -> owner.equals(edit.owner));
+        pendingBlueprints.remove(owner);
+        terminalSessions.values().removeIf(session -> {
+            if (!owner.equals(session.owner)) return false;
+            session.closed = true;
+            return true;
+        });
+        clouds.remove(owner);
+        machineCaches.remove(owner);
+        recycleBins.remove(owner);
+        specialNodeStores.remove(owner);
+        guiMachines.remove(owner);
+        guiRecycle.remove(owner);
+        runtimeDirtyLines.remove(owner);
+        runtimeWarehouseDeltas.remove(owner);
+        durableCloudBaselines.remove(owner);
+        runtimeIngress.remove(owner);
+        typeUnblockListeners.remove(owner);
+        if (parent != null) parent.cloudViews.remove(owner);
+    }
+
+    private void deleteTeamRecoveryDirectory(UUID owner) {
+        Path ownerDirectory = ownerDirectory(owner).toAbsolutePath().normalize();
+        Path storageRoot = root.toAbsolutePath().normalize();
+        if (!ownerDirectory.startsWith(storageRoot) || !Files.isDirectory(ownerDirectory)) return;
+        try (Stream<Path> paths = Files.walk(ownerDirectory)) {
+            paths.sorted(Comparator.reverseOrder()).forEach(path -> {
+                try {
+                    Files.deleteIfExists(path);
+                } catch (IOException failure) {
+                    throw dataError(failure);
+                }
+            });
+        } catch (IOException failure) {
+            throw dataError(failure);
+        }
+    }
+
+    private static final class TeamRecoveryRecord {
+        final UUID owner, lastOwner;
+        final String teamId, status;
+        final short teamUid;
+
+        TeamRecoveryRecord(UUID owner, String teamId, short teamUid, UUID lastOwner, String status) {
+            this.owner = owner;
+            this.teamId = teamId;
+            this.teamUid = teamUid;
+            this.lastOwner = lastOwner;
+            this.status = status;
+        }
     }
 
     /**
      * Owner-level machine cache; missing files start empty (path is the identity).
      */
-    public mekanism.cloudworks.common.data.CloudworksMachineCache machineCache(UUID owner) {
+    public CloudworksMachineCache machineCache(UUID owner) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
             return target.machineCache(owner);
         }
         synchronized (this) {
             Objects.requireNonNull(owner);
-            return machineCaches.computeIfAbsent(owner, ignored -> new mekanism.cloudworks.common.data.CloudworksMachineCache());
+            return machineCaches.computeIfAbsent(owner, ignored -> new CloudworksMachineCache());
         }
     }
 
     /**
      * Owner-level recycle bin; missing files start empty.
      */
-    public mekanism.cloudworks.common.data.CloudworksRecycleBin recycleBin(UUID owner) {
+    public CloudworksRecycleBin recycleBin(UUID owner) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
             return target.recycleBin(owner);
         }
         synchronized (this) {
             Objects.requireNonNull(owner);
-            return recycleBins.computeIfAbsent(owner, ignored -> new mekanism.cloudworks.common.data.CloudworksRecycleBin());
+            return recycleBins.computeIfAbsent(owner, ignored -> new CloudworksRecycleBin());
         }
     }
 
     /**
-     * Deposits machines into the cache; single-file durable write.
+     * Trusted reward entry. Validates and publishes a detached copy, never a physical inventory debit.
+     */
+    public void depositAssets(UUID owner, CloudworksDepositRequest request) {
+        if (parent == null) {
+            domain(owner).depositAssets(owner, request);
+            return;
+        }
+        synchronized (this) {
+            CloudworksData existing = loadIfExists(owner);
+            if (existing == null || !existing.enabled()) throw error("disabled");
+            existing = requireEnabled(owner);
+            if (request.kind() == CloudworksDepositRequest.Kind.MACHINE) {
+                ItemStack stack = request.item();
+                if (!CloudworksRegistries.isRegistered(stack)) throw error("machine_unregistered");
+                CloudworksMachineCache cache = CloudworksMachineCache.read(machineCache(owner).write());
+                CloudworksMachineCache.Entry old = cache.findType(stack);
+                Math.addExact(old == null ? 0 : old.count(), request.amount());
+                cache.deposit(stack, request.amount());
+                persistMachineCache(owner, cache);
+                machineCaches.put(owner, cache);
+                changed(owner);
+                return;
+            }
+            ResourceLocation typeId = request.upgrade();
+            if (request.kind() == CloudworksDepositRequest.Kind.UPGRADE_ITEM) {
+                ItemStack item = request.item();
+                typeId = CloudworksMachineModuleRegistry.typeForItem(item);
+                if (typeId == null) {
+                    Upgrade nativeType = CloudworksUpgradeItems.local().typeOf(item);
+                    if (nativeType == null) throw error("upgrade");
+                    typeId = nativeType == Upgrade.SPEED
+                            ? MachineModuleType.SPEED_ID : MachineModuleType.ENERGY_ID;
+                }
+            }
+            CloudworksData cloud = existing.copyForRuntime();
+            if (MachineModuleType.SPEED_ID.equals(typeId)
+                    || MachineModuleType.ENERGY_ID.equals(typeId)) {
+                cloud.addUpgradePool(MachineModuleType.SPEED_ID.equals(typeId),
+                        Math.toIntExact(request.amount()));
+            } else {
+                MachineModuleType type =
+                        CloudworksMachineModuleRegistry.type(typeId);
+                if (type == null || type.slot() != MachineModuleType.Slot.CUSTOM)
+                    throw error("upgrade");
+                cloud.customUpgradePool().add(typeId, request.amount());
+            }
+            publishTags(owner, cloud.write(), Collections.emptyList());
+        }
+    }
+
+    /**
+     * Performs only the cloud-side half of a trusted external transfer.
+     */
+    public CloudworksTransferResult transferAssets(UUID owner,
+                                                                           CloudworksTransferRequest request) {
+        if (parent == null) return domain(owner).transferAssets(owner, request);
+        synchronized (this) {
+            CloudworksData cloud = requireEnabled(owner).copyForRuntime();
+            if (request.direction() == CloudworksTransferRequest.Direction.UPLOAD) {
+                switch (request.kind()) {
+                    case MACHINE: {
+                        ItemStack stack = request.machine();
+                        if (!CloudworksRegistries.isRegistered(stack)) throw error("machine_unregistered");
+                        CloudworksMachineCache cache = CloudworksMachineCache.read(machineCache(owner).write());
+                        cache.deposit(stack, request.amount());
+                        persistMachineCache(owner, cache);
+                        machineCaches.put(owner, cache);
+                        changed(owner);
+                        return CloudworksTransferResult.accepted(request.amount(),
+                                Collections.emptyList());
+                    }
+                    case UPGRADE: {
+                        addUpgradeTypeToCloud(cloud, request.upgrade(), request.amount());
+                        publishTags(owner, cloud.write(), Collections.emptyList());
+                        return CloudworksTransferResult.accepted(request.amount(),
+                                Collections.emptyList());
+                    }
+                    case RESOURCE: {
+                        CloudworksInventory inventory = transferInventory(cloud, request.warehouse());
+                        long accepted = inventory.insert(request.resource(), request.amount(),
+                                cloud.effectiveWarehouseItemCap());
+                        if (accepted <= 0)
+                            return transferRefused(CloudworksTransferResult.Status.CAPACITY,
+                                    "cloudworks.error.capacity");
+                        publishTags(owner, cloud.write(), Collections.emptyList());
+                        return CloudworksTransferResult.accepted(accepted,
+                                Collections.emptyList());
+                    }
+                    default:
+                        throw error("deposit_item");
+                }
+            }
+            switch (request.kind()) {
+                case MACHINE: {
+                    CloudworksMachineCache cache = CloudworksMachineCache.read(machineCache(owner).write());
+                    int type = cache.typeIndex(request.machine());
+                    if (type < 0)
+                        return transferRefused(CloudworksTransferResult.Status.INSUFFICIENT,
+                                "cloudworks.error.not_found");
+                    NBTTagCompound target = CloudworksMachineCache.findVariant(cache.entries().get(type),
+                            request.machine()) == null ? null
+                            : CloudworksMachineCache.findVariant(cache.entries().get(type), request.machine()).tag();
+                    if (target == null)
+                        return transferRefused(CloudworksTransferResult.Status.INSUFFICIENT,
+                                "cloudworks.error.not_found");
+                    Map<NBTTagCompound, Long> claimed = deriveOccupation(owner, cache).getOrDefault(type, Collections.emptyMap());
+                    long wanted = Math.min(request.amount(), MAX_WITHDRAW_PER_CALL);
+                    List<ItemStack> result = cache.withdraw(type, wanted, variant ->
+                            variant.tag().equals(target) ? (int) Math.min(Integer.MAX_VALUE,
+                                    Math.max(0L, variant.count() - claimed.getOrDefault(target, 0L))) : 0);
+                    if (result.isEmpty())
+                        return transferRefused(CloudworksTransferResult.Status.INSUFFICIENT,
+                                "cloudworks.error.not_found");
+                    persistMachineCache(owner, cache);
+                    machineCaches.put(owner, cache);
+                    changed(owner);
+                    return CloudworksTransferResult.accepted(
+                            result.stream().mapToLong(ItemStack::getCount).sum(), result);
+                }
+                case UPGRADE: {
+                    long taken = takeUpgradeTypeFromCloud(cloud, request.upgrade(), request.amount());
+                    if (taken <= 0)
+                        return transferRefused(CloudworksTransferResult.Status.INSUFFICIENT,
+                                "cloudworks.error.not_found");
+                    publishTags(owner, cloud.write(), Collections.emptyList());
+                    return CloudworksTransferResult.accepted(taken, Collections.emptyList());
+                }
+                case RESOURCE: {
+                    CloudworksInventory inventory = transferInventory(cloud, request.warehouse());
+                    long taken = inventory.extract(request.resource(), request.amount());
+                    if (taken <= 0)
+                        return transferRefused(CloudworksTransferResult.Status.INSUFFICIENT,
+                                "cloudworks.error.not_found");
+                    publishTags(owner, cloud.write(), Collections.emptyList());
+                    return CloudworksTransferResult.accepted(taken, Collections.emptyList());
+                }
+                default:
+                    throw error("deposit_item");
+            }
+        }
+    }
+
+    private static CloudworksTransferResult transferRefused(
+            CloudworksTransferResult.Status status, String error) {
+        return CloudworksTransferResult.refused(status, error);
+    }
+
+    private static CloudworksInventory transferInventory(CloudworksData cloud,
+                                                         CloudworksTransferRequest.Warehouse warehouse) {
+        switch (warehouse) {
+            case RECEIVING:
+                return cloud.receiving();
+            case TRANSFER:
+                return cloud.transfer();
+            case SENDING:
+                return cloud.sending();
+            default:
+                throw new IllegalArgumentException("Invalid warehouse");
+        }
+    }
+
+    private static void addUpgradeTypeToCloud(CloudworksData cloud, ResourceLocation id, long amount) {
+        if (MachineModuleType.SPEED_ID.equals(id) || MachineModuleType.ENERGY_ID.equals(id)) {
+            cloud.addUpgradePool(MachineModuleType.SPEED_ID.equals(id), Math.toIntExact(amount));
+            return;
+        }
+        MachineModuleType type = CloudworksMachineModuleRegistry.type(id);
+        if (type == null || type.slot() != MachineModuleType.Slot.CUSTOM) throw error("upgrade");
+        cloud.customUpgradePool().add(id, amount);
+    }
+
+    private static long takeUpgradeTypeFromCloud(CloudworksData cloud, ResourceLocation id, long amount) {
+        if (MachineModuleType.SPEED_ID.equals(id) || MachineModuleType.ENERGY_ID.equals(id)) {
+            boolean speed = MachineModuleType.SPEED_ID.equals(id);
+            int taken = Math.min(cloud.upgradePool(speed), Math.toIntExact(Math.min(amount, Integer.MAX_VALUE)));
+            if (taken > 0) cloud.addUpgradePool(speed, -taken);
+            return taken;
+        }
+        MachineModuleType type = CloudworksMachineModuleRegistry.type(id);
+        if (type == null || type.slot() != MachineModuleType.Slot.CUSTOM) throw error("upgrade");
+        long taken = Math.min(amount, cloud.customUpgradePool().count(id));
+        if (taken > 0) cloud.customUpgradePool().add(id, -taken);
+        return taken;
+    }
+
+    /**
+     * Deposits machines into the cache; single-file ordered write.
      */
     public void depositMachines(UUID owner, ItemStack stack) {
         if (parent == null) {
@@ -4437,7 +6585,7 @@ public final class CloudworksPlayerDataManager {
         }
         synchronized (this) {
             requireEnabled(owner);
-            mekanism.cloudworks.common.data.CloudworksMachineCache cache = machineCache(owner);
+            CloudworksMachineCache cache = machineCache(owner);
             cache.deposit(stack);
             persistMachineCache(owner, cache);
         }
@@ -4454,10 +6602,10 @@ public final class CloudworksPlayerDataManager {
         }
         synchronized (this) {
             requireEnabled(owner);
-            mekanism.cloudworks.common.data.CloudworksMachineCache cache = machineCache(owner);
+            CloudworksMachineCache cache = machineCache(owner);
             if (typeIndex < 0 || typeIndex >= cache.typeCount()) throw error("not_found");
-            List<mekanism.cloudworks.common.data.CloudworksMachineCache.Entry> entries = cache.entries();
-            List<mekanism.cloudworks.common.data.CloudworksMachineCache.Variant> variants = entries.get(typeIndex).variants();
+            List<CloudworksMachineCache.Entry> entries = cache.entries();
+            List<CloudworksMachineCache.Variant> variants = entries.get(typeIndex).variants();
             if (variantIndex < 0 || variantIndex >= variants.size()) throw error("not_found");
             NBTTagCompound targetTag = variants.get(variantIndex).tag();
             long wanted = Math.min(Math.max(0L, amount), MAX_WITHDRAW_PER_CALL);
@@ -4465,7 +6613,7 @@ public final class CloudworksPlayerDataManager {
             Map<Integer, Map<NBTTagCompound, Long>> occupied = deriveOccupation(owner, cache);
             Map<NBTTagCompound, Long> byTag = occupied.getOrDefault(typeIndex, Collections.emptyMap());
             List<ItemStack> withdrawn = cache.withdraw(typeIndex, wanted, variant -> {
-                if (!java.util.Objects.equals(variant.tag(), targetTag)) return 0;
+                if (!Objects.equals(variant.tag(), targetTag)) return 0;
                 long free = variant.count() - byTag.getOrDefault(variant.tag(), 0L);
                 return (int) Math.min(Math.max(0, free), Integer.MAX_VALUE);
             });
@@ -4504,7 +6652,7 @@ public final class CloudworksPlayerDataManager {
         }
         synchronized (this) {
             requireEnabled(owner);
-            mekanism.cloudworks.common.data.CloudworksMachineCache cache = machineCache(owner);
+            CloudworksMachineCache cache = machineCache(owner);
             if (typeIndex < 0 || typeIndex >= cache.typeCount()) throw error("not_found");
             long wanted = Math.min(Math.max(0L, amount), MAX_WITHDRAW_PER_CALL);
             if (wanted == 0) return Collections.emptyList();
@@ -4528,12 +6676,22 @@ public final class CloudworksPlayerDataManager {
             return target.machineCacheView(owner);
         }
         synchronized (this) {
-            mekanism.cloudworks.common.data.CloudworksMachineCache cache = machineCache(owner);
+            CloudworksMachineCache cache = machineCache(owner);
             Map<Integer, Map<NBTTagCompound, Long>> occupied = deriveOccupation(owner, cache);
             List<Map<String, Object>> view = new ArrayList<>();
-            List<mekanism.cloudworks.common.data.CloudworksMachineCache.Entry> entries = cache.entries();
+            List<CloudworksMachineCache.Entry> entries = cache.entries();
+            Map<MachineKey, Map<UUID, Long>> lineClaims = new HashMap<>();
+            for (ProductionLineData line : lines(owner)) {
+                for (MachineNodeData node : line.machines()) {
+                    MachineKey key = CloudworksRegistries.identityKey(node.machine());
+                    lineClaims.computeIfAbsent(key, ignored -> new HashMap<>())
+                            .merge(line.lineId(), node.machineCount(), Math::addExact);
+                }
+            }
             for (int index = 0; index < entries.size(); index++) {
-                mekanism.cloudworks.common.data.CloudworksMachineCache.Entry entry = entries.get(index);
+                CloudworksMachineCache.Entry entry = entries.get(index);
+                MachineKey entryKey =
+                        CloudworksRegistries.identityKey(entry.template());
                 Map<NBTTagCompound, Long> byTag = occupied.getOrDefault(index, Collections.emptyMap());
                 long claimed = 0;
                 for (Long amount : byTag.values()) claimed = Math.addExact(claimed, amount);
@@ -4545,12 +6703,8 @@ public final class CloudworksPlayerDataManager {
                 row.put("claimed", claimed);
                 List<Map<String, Object>> claims = new ArrayList<>();
                 for (ProductionLineData line : lines(owner)) {
-                    long lineClaim = 0;
-                    for (MachineNodeData node : line.machines()) {
-                        if (ItemStack.areItemsEqual(entry.template(), node.machine())) {
-                            lineClaim = Math.addExact(lineClaim, node.machineCount());
-                        }
-                    }
+                    long lineClaim = lineClaims.getOrDefault(entryKey, Collections.emptyMap())
+                            .getOrDefault(line.lineId(), 0L);
                     if (lineClaim > 0) {
                         Map<String, Object> claim = new LinkedHashMap<>();
                         claim.put("id", line.lineId().toString());
@@ -4572,7 +6726,7 @@ public final class CloudworksPlayerDataManager {
      * matching cache variant.
      */
     private Map<Integer, Map<NBTTagCompound, Long>> deriveOccupation(UUID owner,
-                                                                     mekanism.cloudworks.common.data.CloudworksMachineCache cache) {
+                                                                     CloudworksMachineCache cache) {
         return CloudworksMachineCacheProjection.occupation(cache, reservationLines(owner, cache));
     }
 
@@ -4591,15 +6745,18 @@ public final class CloudworksPlayerDataManager {
             }
             // An unexpected close can still restore the persisted baseline. Keep its backing reserved.
             if (baseline != null) {
-                Map<mekanism.cloudworks.common.registry.MachineKey, Long> present = new HashMap<>();
-                for (MachineNodeData node : projection.machines()) present.merge(CloudworksRegistries.identityKey(node.machine()), node.machineCount(), Math::addExact);
-                Map<mekanism.cloudworks.common.registry.MachineKey, Long> original = new HashMap<>();
-                for (MachineNodeData node : baseline.machines()) original.merge(CloudworksRegistries.identityKey(node.machine()), node.machineCount(), Math::addExact);
-                for (Map.Entry<mekanism.cloudworks.common.registry.MachineKey, Long> type : original.entrySet()) {
+                Map<MachineKey, Long> present = new HashMap<>();
+                for (MachineNodeData node : projection.machines())
+                    present.merge(CloudworksRegistries.identityKey(node.machine()), node.machineCount(), Math::addExact);
+                Map<MachineKey, Long> original = new HashMap<>();
+                for (MachineNodeData node : baseline.machines())
+                    original.merge(CloudworksRegistries.identityKey(node.machine()), node.machineCount(), Math::addExact);
+                for (Map.Entry<MachineKey, Long> type : original.entrySet()) {
                     long extra = type.getValue() - present.getOrDefault(type.getKey(), 0L);
                     if (extra <= 0) continue;
                     MachineNodeData node = new MachineNodeData(UUID.randomUUID(), type.getKey().displayStack(), 0, 0);
-                    node.setMachineCount(extra); node.setPooledClaim(true);
+                    node.setMachineCount(extra);
+                    node.setPooledClaim(true);
                     projection.machines().add(node);
                 }
             }
@@ -4614,22 +6771,17 @@ public final class CloudworksPlayerDataManager {
      * saves keep their counts; NBT variants normalize to the template).
      */
     private void backfillMachineCache(UUID owner) {
-        mekanism.cloudworks.common.data.CloudworksMachineCache cache = machineCache(owner);
+        CloudworksMachineCache cache = machineCache(owner);
         Map<Integer, Map<NBTTagCompound, Long>> occupied = deriveOccupation(owner, cache);
-        List<mekanism.cloudworks.common.data.CloudworksMachineCache.Entry> entries = cache.entries();
         boolean changed = false;
         for (ProductionLineData line : lines(owner)) {
             for (MachineNodeData node : line.machines()) {
                 if (node.pooledClaim()) continue;
-                int index = -1;
-                for (int i = 0; i < entries.size(); i++)
-                    if (ItemStack.areItemsEqual(entries.get(i).template(), node.machine())) {
-                        index = i;
-                        break;
-                    }
-                mekanism.cloudworks.common.data.CloudworksMachineCache.Variant variant = null;
-                if (index >= 0) variant = mekanism.cloudworks.common.data.CloudworksMachineCache.findVariant(
-                        entries.get(index), node.machine());
+                int index = cache.typeIndex(node.machine());
+                CloudworksMachineCache.Entry entry = cache.findType(node.machine());
+                CloudworksMachineCache.Variant variant = null;
+                if (entry != null) variant = CloudworksMachineCache.findVariant(
+                        entry, node.machine());
                 long backing = variant == null ? 0 : variant.count();
                 long claim = node.machineCount();
                 long sameVariantClaims = index < 0 ? 0 : occupied.getOrDefault(index, Collections.emptyMap())
@@ -4646,11 +6798,11 @@ public final class CloudworksPlayerDataManager {
     private void loadMachineCache(UUID owner) {
         if (machineCaches.containsKey(owner)) return;
         Path file = machineCacheFile(owner);
-        mekanism.cloudworks.common.data.CloudworksMachineCache cache;
+        CloudworksMachineCache cache;
         if (Files.exists(file)) {
             NBTTagCompound tag = read(file);
-            cache = mekanism.cloudworks.common.data.CloudworksMachineCache.read(tag);
-        } else cache = new mekanism.cloudworks.common.data.CloudworksMachineCache();
+            cache = CloudworksMachineCache.read(tag);
+        } else cache = new CloudworksMachineCache();
         machineCaches.put(owner, cache);
     }
 
@@ -4784,15 +6936,15 @@ public final class CloudworksPlayerDataManager {
     private void loadRecycleBin(UUID owner) {
         if (recycleBins.containsKey(owner)) return;
         Path file = recycleFile(owner);
-        mekanism.cloudworks.common.data.CloudworksRecycleBin bin;
+        CloudworksRecycleBin bin;
         if (Files.exists(file)) {
             NBTTagCompound tag = read(file);
-            bin = mekanism.cloudworks.common.data.CloudworksRecycleBin.read(tag);
-        } else bin = new mekanism.cloudworks.common.data.CloudworksRecycleBin();
+            bin = CloudworksRecycleBin.read(tag);
+        } else bin = new CloudworksRecycleBin();
         recycleBins.put(owner, bin);
     }
 
-    private void persistMachineCache(UUID owner, mekanism.cloudworks.common.data.CloudworksMachineCache cache) {
+    private void persistMachineCache(UUID owner, CloudworksMachineCache cache) {
         // Upload intents project machine-cache.dat too; this ordered write can
         // never be clobbered by a queued batch's (older) projection.
         NBTTagCompound tag = cache.write();
@@ -4800,7 +6952,7 @@ public final class CloudworksPlayerDataManager {
         guiMachines.put(owner, tag);
     }
 
-    private void persistRecycleBin(UUID owner, mekanism.cloudworks.common.data.CloudworksRecycleBin bin) {
+    private void persistRecycleBin(UUID owner, CloudworksRecycleBin bin) {
         NBTTagCompound tag = bin.write();
         orderedWrite(owner, recycleFile(owner), tag);
         guiRecycle.put(owner, tag);
@@ -4809,9 +6961,9 @@ public final class CloudworksPlayerDataManager {
     /**
      * Owners with pending recycle overflow notices; drained by the server tick service.
      */
-    public synchronized java.util.Set<UUID> drainRecycleOverflowNotices() {
+    public synchronized Set<UUID> drainRecycleOverflowNotices() {
         if (pendingRecycleOverflow.isEmpty()) return Collections.emptySet();
-        java.util.Set<UUID> drained = new LinkedHashSet<>(pendingRecycleOverflow);
+        Set<UUID> drained = new LinkedHashSet<>(pendingRecycleOverflow);
         pendingRecycleOverflow.clear();
         return drained;
     }
@@ -4836,15 +6988,15 @@ public final class CloudworksPlayerDataManager {
         synchronized (this) {
             drainInteraction();   // ordering only; the publish itself is queued
             CloudworksData cloud = requireEnabled(owner);
-            mekanism.cloudworks.common.data.CloudworksRecycleBin bin = recycleBin(owner);
+            CloudworksRecycleBin bin = recycleBin(owner);
             if (bin.typeCount() == 0) return 0L;
             CloudworksData previousCloud = cloud.copyForRuntime();
             NBTTagCompound previousBin = bin.write();
             try {
-                Map<mekanism.api.qio.resource.QIOResourceDescriptor, Long> drained = bin.drain();
+                Map<QIOResourceDescriptor, Long> drained = bin.drain();
                 long total = 0;
                 CloudworksInventory destination = cloud.recycleToTransfer() ? cloud.transfer() : cloud.sending();
-                for (Map.Entry<mekanism.api.qio.resource.QIOResourceDescriptor, Long> entry : drained.entrySet()) {
+                for (Map.Entry<QIOResourceDescriptor, Long> entry : drained.entrySet()) {
                     if (destination.insert(entry.getKey(), entry.getValue()) != entry.getValue())
                         throw new IllegalStateException("Warehouse rejected recycle routing");
                     total = Math.addExact(total, entry.getValue());
@@ -4856,7 +7008,7 @@ public final class CloudworksPlayerDataManager {
                 return total;
             } catch (RuntimeException failure) {
                 clouds.put(owner, previousCloud);
-                recycleBins.put(owner, mekanism.cloudworks.common.data.CloudworksRecycleBin.read(previousBin));
+                recycleBins.put(owner, CloudworksRecycleBin.read(previousBin));
                 throw failure;
             }
         }
@@ -4875,7 +7027,7 @@ public final class CloudworksPlayerDataManager {
             // recycle.dat is also written by queued intents (route projection);
             // persistRecycleBin orders this write behind any backlog (bounded).
             requireEnabled(owner);
-            mekanism.cloudworks.common.data.CloudworksRecycleBin bin = recycleBin(owner);
+            CloudworksRecycleBin bin = recycleBin(owner);
             if (bin.typeCount() == 0) return;
             bin.clear();
             persistRecycleBin(owner, bin);
@@ -4911,7 +7063,9 @@ public final class CloudworksPlayerDataManager {
     // deleted with their retired fixtures; the frozen Runtime capture below is
     // the only capture form.
 
-    /** A cloud without running lines still owns warehouse energy routing. */
+    /**
+     * A cloud without running lines still owns warehouse energy routing.
+     */
     public VirtualSnapshot captureRuntimeSnapshot(UUID owner, List<UUID> selectedIds) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
@@ -4923,7 +7077,7 @@ public final class CloudworksPlayerDataManager {
                 throw new IllegalArgumentException("Invalid Runtime selection");
             Map<UUID, NBTTagCompound> baselines = new LinkedHashMap<>();
             for (UUID id : selectedIds) {
-                NBTTagCompound tag = guiLines.get(id);
+                NBTTagCompound tag = publishedLineTag(id);
                 if (tag == null || !owner.toString().equals(tag.getString("owner"))
                         || !cloud.lineIds().contains(id) || !tag.getBoolean("enabled")
                         || !tag.getBoolean("explicitRouting"))
@@ -4935,7 +7089,7 @@ public final class CloudworksPlayerDataManager {
                     sessionGenerations.getOrDefault(owner, 0L), CloudworksRegistries.version(),
                     CloudworksRegistries.layoutFingerprint(),
                     RecipeHandler.getGlobalRecipeVersion(), UUID.randomUUID(), symbols.generation(),
-                    CloudworksTransactionSeeds.next(), cloud, baselines, true);
+                    CloudworksTransactionSeeds.next(), cloud, baselines, true, specialNodeStore(owner).load());
         }
     }
 
@@ -4993,7 +7147,7 @@ public final class CloudworksPlayerDataManager {
      * The revision covers every external mutation since the worker's input.
      */
     public CommitStatus commitRuntimeCheckpoint(VirtualSnapshot origin, long expectedRevision,
-            mekanism.cloudworks.common.runtime.CloudworksRuntimeCheckpoint checkpoint) {
+                                                CloudworksRuntimeCheckpoint checkpoint) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(origin.owner);
             return target.commitRuntimeCheckpoint(origin, expectedRevision, checkpoint);
@@ -5004,52 +7158,56 @@ public final class CloudworksPlayerDataManager {
     }
 
     public CommitStatus commitRuntimeCheckpoint(VirtualSnapshot origin, long expectedRevision,
-            mekanism.cloudworks.common.runtime.CloudworksRuntimeCheckpoint checkpoint, boolean durable) {
+                                                CloudworksRuntimeCheckpoint checkpoint, boolean durable) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(origin.owner);
             return target.commitRuntimeCheckpoint(origin, expectedRevision, checkpoint, durable);
         }
         synchronized (this) {
             UUID owner = origin.owner;
-            if (!runtimeCurrent(origin, expectedRevision)) return CommitStatus.CONFLICT;
+            if (checkpoint.accepted() || !runtimeCurrent(origin, expectedRevision)) return CommitStatus.CONFLICT;
             if (!owner.equals(checkpoint.cloud().owner()) || !clouds.containsKey(owner))
                 return CommitStatus.CONFLICT;
-            List<mekanism.cloudworks.common.runtime.CloudworksExternalEvent> ingress =
+            List<CloudworksExternalEvent> ingress =
                     runtimeIngressAfter(owner, checkpoint.appliedSequence());
             if (ingress == null) return CommitStatus.CONFLICT;
             checkpoint.mergeIngress(ingress, symbols(owner));
             List<UUID> updated = checkpoint.lineIds();
-            List<NBTTagCompound> tags = checkpoint.lineTags();
-            Map<UUID, NBTTagCompound> next = new LinkedHashMap<>();
+            List<mekanism.cloudworks.common.runtime.CloudworksRuntimeLineSnapshot> snapshots = checkpoint.lineSnapshots();
+            Map<UUID, java.util.function.Supplier<NBTTagCompound>> next = new LinkedHashMap<>();
             for (int index = 0; index < updated.size(); index++) {
                 UUID id = updated.get(index);
                 if (!lines.containsKey(id) || !clouds.get(owner).lineIds().contains(id)
-                        || !owner.toString().equals(tags.get(index).getString("owner"))
-                        || !id.toString().equals(tags.get(index).getString("lineId")))
+                        || !owner.equals(snapshots.get(index).owner())
+                        || !id.equals(snapshots.get(index).lineId()))
                     return CommitStatus.CONFLICT;
-                next.put(id, tags.get(index));
+                if (durable) next.put(id, snapshots.get(index)::write);
             }
             CloudworksWarehouseDelta changes = new CloudworksWarehouseDelta();
             CloudworksWarehouseDelta pendingChanges = runtimeWarehouseDeltas.get(owner);
             if (pendingChanges != null) changes.merge(pendingChanges);
             changes.merge(checkpoint.changes());
             if (durable) {
-                Map<UUID, NBTTagCompound> all = pendingRuntimeTags(owner);
+                Map<UUID, java.util.function.Supplier<NBTTagCompound>> all = pendingRuntimeValues(owner);
                 all.putAll(next);
-                persistRuntimeTags(owner, checkpoint.coreTag(), all, changes.write());
+                persistRuntimeValues(owner, checkpoint.coreTag(), all, changes.write());
             }
             if (!checkpoint.acceptOnce()) return CommitStatus.CONFLICT;
             clouds.put(owner, checkpoint.cloud());
             for (int index = 0; index < updated.size(); index++) {
                 UUID id = updated.get(index);
-                guiLines.put(id, tags.get(index));
+                runtimeLineSnapshots.put(id, snapshots.get(index));
+                guiLines.remove(id);
                 runtimeUnmaterialized.add(id);
             }
             if (!durable) {
-                runtimeDirtyLines.computeIfAbsent(owner, ignored -> new LinkedHashSet<>()).addAll(next.keySet());
+                runtimeDirtyLines.computeIfAbsent(owner, ignored -> new LinkedHashSet<>()).addAll(updated);
                 runtimeWarehouseDeltas.put(owner, changes);
             }
             changedFromRuntime(owner);
+            checkpoint.publishModuleEvents();
+            CloudworksAPI.emit(new CloudworksEvent(owner, null,
+                    CloudworksEvent.Kind.RUNTIME_COMMITTED, revisions.get(owner), 1, ""));
             return CommitStatus.COMMITTED;
         }
     }
@@ -5060,11 +7218,33 @@ public final class CloudworksPlayerDataManager {
         CloudworksData cloud = clouds.get(owner);
         if (ids != null && cloud != null)
             for (UUID id : ids)
-                if (cloud.lineIds().contains(id) && guiLines.containsKey(id)) tags.put(id, guiLines.get(id));
+                if (cloud.lineIds().contains(id)) {
+                    NBTTagCompound tag = publishedLineTag(id);
+                    if (tag != null) tags.put(id, tag);
+                }
         return tags;
     }
 
-    /** Independent save cadence. Only frozen payload references and line metadata are visited here. */
+    /** Captures only immutable publications, never the manager or its live maps. */
+    private Map<UUID, java.util.function.Supplier<NBTTagCompound>> pendingRuntimeValues(UUID owner) {
+        Map<UUID, java.util.function.Supplier<NBTTagCompound>> values = new LinkedHashMap<>();
+        Set<UUID> ids = runtimeDirtyLines.get(owner);
+        CloudworksData cloud = clouds.get(owner);
+        if (ids != null && cloud != null) for (UUID id : ids) {
+            if (!cloud.lineIds().contains(id)) continue;
+            mekanism.cloudworks.common.runtime.CloudworksRuntimeLineSnapshot snapshot = runtimeLineSnapshots.get(id);
+            if (snapshot != null) values.put(id, snapshot::write);
+            else {
+                NBTTagCompound tag = guiLines.get(id);
+                if (tag != null) values.put(id, () -> tag);
+            }
+        }
+        return values;
+    }
+
+    /**
+     * Independent save cadence. Only frozen payload references and line metadata are visited here.
+     */
     public void flushRuntimePending(UUID owner) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
@@ -5076,7 +7256,7 @@ public final class CloudworksPlayerDataManager {
             CloudworksData cloud = clouds.get(owner);
             if (cloud == null) return;
             CloudworksWarehouseDelta changes = runtimeWarehouseDeltas.get(owner);
-            persistRuntimeTags(owner, cloud.writeCore(), pendingRuntimeTags(owner),
+            persistRuntimeValues(owner, cloud.writeCore(), pendingRuntimeValues(owner),
                     changes == null ? new CloudworksWarehouseDelta().write() : changes.write());
         }
     }
@@ -5087,6 +7267,13 @@ public final class CloudworksPlayerDataManager {
 
     private void persistRuntimeTags(UUID owner, NBTTagCompound cloud, Map<UUID, NBTTagCompound> tags,
                                     NBTTagCompound warehouseDelta) {
+        Map<UUID, java.util.function.Supplier<NBTTagCompound>> values = new LinkedHashMap<>();
+        tags.forEach((id, tag) -> values.put(id, () -> tag));
+        persistRuntimeValues(owner, cloud, values, warehouseDelta);
+    }
+
+    private void persistRuntimeValues(UUID owner, NBTTagCompound cloud,
+            Map<UUID, java.util.function.Supplier<NBTTagCompound>> values, NBTTagCompound warehouseDelta) {
         NBTTagCompound intent = new NBTTagCompound();
         intent.setInteger("schema", 1);
         intent.setString("owner", owner.toString());
@@ -5098,26 +7285,32 @@ public final class CloudworksPlayerDataManager {
         if (warehouseDelta != null) {
             intent.setTag("warehouseDelta", warehouseDelta.copy());
         }
-        NBTTagList entries = new NBTTagList();
         Map<UUID, Long> generations = new LinkedHashMap<>();
-        for (Map.Entry<UUID, NBTTagCompound> line : tags.entrySet()) {
-            // Shallow headers: every nested machine/channel tag is frozen.
-            NBTTagCompound tag = new NBTTagCompound();
-            for (String key : line.getValue().getKeySet()) tag.setTag(key, line.getValue().getTag(key));
-            long generation = Math.addExact(checkpointGenerations.getOrDefault(line.getKey(), 0L), 1L);
-            tag.setLong("generation", generation);
-            entries.appendTag(tag);
-            generations.put(line.getKey(), generation);
-        }
-        intent.setTag("lines", entries);
+        values.keySet().forEach(id -> generations.put(id, Math.addExact(checkpointGenerations.getOrDefault(id, 0L), 1L)));
+        Map<UUID, java.util.function.Supplier<NBTTagCompound>> frozen = new LinkedHashMap<>(values);
+        java.util.function.Supplier<NBTTagCompound> materialize = () -> {
+            NBTTagList entries = new NBTTagList();
+            for (Map.Entry<UUID, java.util.function.Supplier<NBTTagCompound>> line : frozen.entrySet()) {
+                NBTTagCompound source = line.getValue().get();
+                NBTTagCompound tag = new NBTTagCompound();
+                for (String key : source.getKeySet()) tag.setTag(key, source.getTag(key));
+                tag.setLong("generation", generations.get(line.getKey()));
+                entries.appendTag(tag);
+            }
+            intent.setTag("lines", entries);
+            return intent;
+        };
         if (persistence == null) {
+            materialize.get();
             ioSink.beginBatch();
             try {
                 ioSink.writeIntentFile(owner, intent);
                 ioSink.applyIntentRelaxed(owner, intent, CloudworksPersistenceQueue.AbortPoint.NONE);
                 ioSink.commitBatch();
-            } finally { ioSink.endBatch(); }
-        } else persistence.submitIntent(owner, intent);
+            } finally {
+                ioSink.endBatch();
+            }
+        } else persistence.submitDeferredIntent(owner, materialize);
         checkpointGenerations.putAll(generations);
         runtimeDirtyLines.remove(owner);
         runtimeWarehouseDeltas.remove(owner);
@@ -5133,7 +7326,9 @@ public final class CloudworksPlayerDataManager {
         durableCloudBaselines.put(owner, submitted);
     }
 
-    /** Constant-size credential check, also used for unchanged Runtime ticks. */
+    /**
+     * Constant-size credential check, also used for unchanged Runtime ticks.
+     */
     public boolean runtimeCurrent(VirtualSnapshot origin, long expectedRevision) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(origin.owner);
@@ -5148,7 +7343,7 @@ public final class CloudworksPlayerDataManager {
                     || CloudworksRegistries.layoutFingerprint() != origin.layoutFingerprint
                     || RecipeHandler.getGlobalRecipeVersion() != origin.recipeVersion
                     || !Arrays.equals(origin.upgradeSettings,
-                            mekanism.cloudworks.common.upgrade.CloudworksUpgradeEffects.settings()))
+                    CloudworksUpgradeEffects.settings()))
                 return false;
             return clouds.containsKey(owner);
         }
@@ -5229,11 +7424,38 @@ public final class CloudworksPlayerDataManager {
                           NBTTagCompound transferTag, NBTTagCompound terminalTag,
                           boolean controlChange, boolean checkpointOnly, NBTTagCompound blueprintPending,
                           Collection<UUID> deletedLineIds) {
+        publish0(owner, cloudTag, lineTags, recycleTag, machineCacheTag, transferTag, terminalTag,
+                controlChange, checkpointOnly, blueprintPending, deletedLineIds, null);
+    }
+
+    private void publish0(UUID owner, NBTTagCompound cloudTag, List<NBTTagCompound> lineTags,
+                          NBTTagCompound recycleTag, NBTTagCompound machineCacheTag,
+                          NBTTagCompound transferTag, NBTTagCompound terminalTag,
+                          boolean controlChange, boolean checkpointOnly, NBTTagCompound blueprintPending,
+                          Collection<UUID> deletedLineIds, CloudworksSpecialNodeStore.Snapshot specialNodes) {
         // Per-owner P1 gate: a poisoned fault domain never submits new durable
         // work; its later batches would only be dropped by the IO worker.
         if (recoveryRequired || failedOwners.contains(owner)) throw dataError(recoveryCause(owner));
         for (NBTTagCompound tag : lineTags) ProductionLineData.read(tag.copy());
-        if (recycleTag != null) mekanism.cloudworks.common.data.CloudworksRecycleBin.read(recycleTag.copy());
+        List<CloudworksModuleEvents.Event> lifecycleEvents = new ArrayList<>();
+        if (controlChange && !checkpointOnly) {
+            CloudworksGenerationContext clock =
+                    new CloudworksGenerationContext(0,
+                            parent == null ? globalSimulatedTick : parent.globalSimulatedTick, 0, false);
+            for (NBTTagCompound tag : lineTags) {
+                UUID id = UUID.fromString(tag.getString("lineId"));
+                NBTTagCompound previous = publishedLineTag(id);
+                lifecycleEvents.addAll(CloudworksModuleEvents.candidateChanges(
+                        previous == null ? null : ProductionLineData.read(previous.copy()),
+                        ProductionLineData.read(tag.copy()), clock));
+            }
+            for (UUID id : deletedLineIds) {
+                NBTTagCompound previous = publishedLineTag(id);
+                if (previous != null) lifecycleEvents.addAll(CloudworksModuleEvents.candidateChanges(
+                        ProductionLineData.read(previous.copy()), null, clock));
+            }
+        }
+        if (recycleTag != null) CloudworksRecycleBin.read(recycleTag.copy());
         if (terminalTag != null && !owner.equals(CloudworksTerminalState.read(terminalTag).owner()))
             throw dataError(null);
         if (machineCacheTag != null) {
@@ -5254,6 +7476,10 @@ public final class CloudworksPlayerDataManager {
         if (machineCacheTag != null) intent.setTag("machineCache", machineCacheTag.copy());
         if (transferTag != null) intent.setTag("transfer", transferTag.copy());
         if (terminalTag != null) intent.setTag("terminal", terminalTag.copy());
+        if (specialNodes != null) {
+            intent.setTag("specialNodeDefinitions", specialNodes.nodesTag());
+            intent.setTag("infiniteResources", specialNodes.resourcesTag());
+        }
         if (blueprintPending != null) {
             CloudworksPendingBlueprint.read(blueprintPending);
             intent.setTag("blueprintPending", blueprintPending.copy());
@@ -5264,7 +7490,7 @@ public final class CloudworksPlayerDataManager {
             for (UUID id : deletedLineIds) {
                 if (id == null || !uniqueDeleted.add(id) || submittedCloud.lineIds().contains(id))
                     throw dataError(null);
-                deleted.appendTag(new net.minecraft.nbt.NBTTagString(id.toString()));
+                deleted.appendTag(new NBTTagString(id.toString()));
             }
             intent.setTag("deletedLines", deleted);
         }
@@ -5288,6 +7514,7 @@ public final class CloudworksPlayerDataManager {
         // The IO thread embeds cloudExisted/previousCloud from the ordered disk
         // state right before writing the intent, so replay validation is exact.
         persistence.submitIntent(owner, intent);
+        CloudworksModuleEvents.enqueue(lifecycleEvents);
         runtimeDirtyLines.remove(owner);
         runtimeWarehouseDeltas.remove(owner);
         clouds.put(owner, submittedCloud);
@@ -5301,19 +7528,22 @@ public final class CloudworksPlayerDataManager {
                 runtimeUnmaterialized.remove(id);
             }
             guiLines.put(id, entry);
+            runtimeLineSnapshots.remove(id);
             checkpointGenerations.put(id, entry.getLong("generation"));
         }
         if (machineCacheTag != null) machineCaches.put(owner,
-                mekanism.cloudworks.common.data.CloudworksMachineCache.read(machineCacheTag.copy()));
+                CloudworksMachineCache.read(machineCacheTag.copy()));
         if (machineCacheTag != null) guiMachines.put(owner, machineCacheTag);
         if (recycleTag != null) guiRecycle.put(owner, recycleTag);
+        if (specialNodes != null) specialNodeStore(owner).publish(specialNodes);
         if (blueprintPending != null) {
             CloudworksPendingBlueprint pendingBlueprint = CloudworksPendingBlueprint.read(blueprintPending);
             if (pendingBlueprint == null) pendingBlueprints.remove(owner);
             else pendingBlueprints.put(owner, pendingBlueprint);
         }
         if (checkpointOnly) return;
-        if (controlChange) changed(owner); else changedFromRuntime(owner);
+        if (controlChange) changed(owner);
+        else changedFromRuntime(owner);
     }
 
     private void replayPendingTransfer(UUID owner) {
@@ -5329,9 +7559,11 @@ public final class CloudworksPlayerDataManager {
             // The residue of THIS owner cannot replay: poison only its domain.
             failedOwners.add(owner);
             ownerFailureCauses.put(owner, failure);
-            System.err.println("CLOUDWORKS-REPLAY FAILED owner=" + owner + ": " + failure);
+            Mekanism.logger.error("Cloudworks persistence replay failed for owner {}", owner, failure);
             throw failure;
-        } finally { if (ownBatch) ioSink.endBatch(); }
+        } finally {
+            if (ownBatch) ioSink.endBatch();
+        }
     }
 
     /**
@@ -5352,7 +7584,18 @@ public final class CloudworksPlayerDataManager {
      * the residue untouched.
      */
     private void applyTransferIntent(UUID owner, NBTTagCompound intent, boolean strict,
-                                      CloudworksPersistenceQueue.AbortPoint abort) {
+                                     CloudworksPersistenceQueue.AbortPoint abort) {
+        if (strict) {
+            IoReads cache = IO_READS.get();
+            if (cache != null) {
+                cache.diskOnly = true;
+                cache.shared.clear();
+                cache.tags.clear();
+                cache.fingerprints.clear();
+                cache.fileDigests.clear();
+                cache.projections.clear();
+            }
+        }
         DEBUG_INTENT_APPLIES.incrementAndGet();
         if (intent.getInteger("schema") == 3) return;
         intent = expandProjectionPatches(owner, intent);
@@ -5374,7 +7617,7 @@ public final class CloudworksPlayerDataManager {
         ProjectionPlan plan = projectionPlan(intent);
         CloudworksData cloud = plan == null ? CloudworksData.read(intent.getCompoundTag("cloud")) : plan.cloud;
         if (plan == null && IO_READS.get() != null)
-            IO_READS.get().projections.put(intent, new ProjectionPlan(cloud));
+            IO_READS.get().projections.put(intent, new ProjectionPlan(cloud, projectionPaths(owner, intent)));
         if (!owner.equals(cloud.owner()) || new HashSet<>(cloud.lineIds()).size() != cloud.lineIds().size())
             throw dataError(null);
         Path cloudPath = cloudFile(owner);
@@ -5432,6 +7675,8 @@ public final class CloudworksPlayerDataManager {
             CloudworksPendingBlueprint pendingBlueprint = CloudworksPendingBlueprint.read(intent.getCompoundTag("blueprintPending"));
             if (pendingBlueprint != null && !cloud.lineIds().contains(pendingBlueprint.line)) throw dataError(null);
         }
+        if (intent.hasKey("infiniteResources", 10) && !intent.hasKey("specialNodeDefinitions", 10))
+            throw dataError(null);
         List<UUID> deletedLineIds = validateDeletedLineFiles(owner, intent, cloud, cloudPath);
         NBTTagList entries = intent.getTagList("lines", 10);
         Set<UUID> seen = new HashSet<>();
@@ -5475,6 +7720,12 @@ public final class CloudworksPlayerDataManager {
             writeIntentProjection(intent, "terminal", terminalFile(terminal.terminalId()), nextProjection(owner, intent, cloud, "terminal"),
                     intent.hasKey("previousTerminal", 10) ? intent.getCompoundTag("previousTerminal") : null, strict);
         }
+        for (String key : new String[]{"specialNodeDefinitions", "infiniteResources"}) {
+            if (intent.hasKey(key, 10)) {
+                Path file = projectionPaths(owner, intent).get(key);
+                writeIntentProjection(intent, key, file, nextProjection(owner, intent, cloud, key), null, strict);
+            }
+        }
         // Durable debit ledger: the entry materialises with the commit itself.
         // Placed before the intent delete so a crash in between replays both
         // (the append is idempotent per transferId).
@@ -5508,7 +7759,7 @@ public final class CloudworksPlayerDataManager {
     }
 
     private List<UUID> validateDeletedLineFiles(UUID owner, NBTTagCompound intent,
-            CloudworksData nextCloud, Path cloudPath) {
+                                                CloudworksData nextCloud, Path cloudPath) {
         if (!intent.hasKey("deletedLines")) return Collections.emptyList();
         if (!intent.hasKey("deletedLines", 9)) throw dataError(null);
         NBTTagList entries = intent.getTagList("deletedLines", 8);
@@ -5518,8 +7769,11 @@ public final class CloudworksPlayerDataManager {
         for (int index = 0; index < entries.tagCount(); index++) {
             String value = entries.getStringTagAt(index);
             UUID id;
-            try { id = UUID.fromString(value); }
-            catch (IllegalArgumentException invalid) { throw dataError(invalid); }
+            try {
+                id = UUID.fromString(value);
+            } catch (IllegalArgumentException invalid) {
+                throw dataError(invalid);
+            }
             if (!id.toString().equalsIgnoreCase(value) || !unique.add(id) || nextCloud.lineIds().contains(id))
                 throw dataError(null);
             Path file = lineFile(owner, id);
@@ -5612,9 +7866,9 @@ public final class CloudworksPlayerDataManager {
      */
     private boolean matchesRecycle(UUID owner, NBTTagCompound intent) {
         NBTTagCompound next = intent.getCompoundTag("recycle");
-        mekanism.cloudworks.common.data.CloudworksRecycleBin.read(next.copy());
+        CloudworksRecycleBin.read(next.copy());
         NBTTagCompound disk = Files.exists(recycleFile(owner))
-                ? read(recycleFile(owner)) : new mekanism.cloudworks.common.data.CloudworksRecycleBin().write();
+                ? read(recycleFile(owner)) : new CloudworksRecycleBin().write();
         return matchesProjection(disk, next,
                 intent.hasKey("previousRecycle", 10) ? intent.getCompoundTag("previousRecycle") : null);
     }
@@ -5624,10 +7878,10 @@ public final class CloudworksPlayerDataManager {
      */
     private boolean matchesMachineCache(UUID owner, NBTTagCompound intent) {
         NBTTagCompound next = intent.getCompoundTag("machineCache");
-        mekanism.cloudworks.common.data.CloudworksMachineCache.read(next.copy());
+        CloudworksMachineCache.read(next.copy());
         NBTTagCompound disk = Files.exists(machineCacheFile(owner))
                 ? read(machineCacheFile(owner))
-                : new mekanism.cloudworks.common.data.CloudworksMachineCache().write();
+                : new CloudworksMachineCache().write();
         return matchesProjection(disk, next,
                 intent.hasKey("previousMachineCache", 10)
                         ? intent.getCompoundTag("previousMachineCache") : null);
@@ -5647,14 +7901,10 @@ public final class CloudworksPlayerDataManager {
         return merged;
     }
 
-    private NBTTagCompound fullCloudOnDisk(UUID owner) {
-        return readDiskCloud(owner).write();
-    }
-
     /**
      * Loads one warehouse file when present; missing files keep the fresh defaults.
      */
-    private void applyWarehouse(Path file, java.util.function.Consumer<NBTTagCompound> applicator) {
+    private void applyWarehouse(Path file, Consumer<NBTTagCompound> applicator) {
         if (!Files.exists(file)) return;
         NBTTagCompound tag = read(file);
         requireSchema(tag, CloudworksData.INVENTORY_SCHEMA_VERSION);
@@ -5676,7 +7926,9 @@ public final class CloudworksPlayerDataManager {
         publishTags(owner, cloud.write(), Collections.emptyList());
     }
 
-    /** Clears only a stopped node's input/output cache and preserves the node. */
+    /**
+     * Clears only a stopped node's input/output cache and preserves the node.
+     */
     public void clearNodeCache(UUID owner, UUID id, UUID nodeId) {
         if (parent == null) {
             CloudworksPlayerDataManager target = domain(owner);
@@ -5699,9 +7951,10 @@ public final class CloudworksPlayerDataManager {
                 node.setProgress(0, 1);
                 node.setState(node.active() ? "WAITING_INPUT" : "OFF");
                 publishTags(owner, clouds.get(owner).write(), Collections.singletonList(line.write()), bin.write());
-                for (CloudworksLineEditSession edit : activeEdits.values()) if (edit.line.equals(id)) {
-                    edit.baseline = structuralLine(line.write());
-                }
+                for (CloudworksLineEditSession edit : activeEdits.values())
+                    if (edit.line.equals(id)) {
+                        edit.baseline = structuralLine(line.write());
+                    }
                 recycleBins.put(owner, bin);
                 changed(owner);
                 if (discarded > 0) pendingRecycleOverflow.add(owner);
@@ -5736,6 +7989,7 @@ public final class CloudworksPlayerDataManager {
         checkpointGenerations.put(line.lineId(), generation);
         runtimeUnmaterialized.remove(line.lineId());
         guiLines.put(line.lineId(), tag);
+        runtimeLineSnapshots.remove(line.lineId());
     }
 
 
@@ -5775,14 +8029,16 @@ public final class CloudworksPlayerDataManager {
         private final long transactionSeed;
         private final CloudworksData cloud;
         private final Map<UUID, NBTTagCompound> lines;
-        private final java.util.concurrent.atomic.AtomicBoolean consumed =
-                new java.util.concurrent.atomic.AtomicBoolean();
+        private final Map<UUID, LineBaseline> lineBaselines = new HashMap<>();
+        private final CloudworksSpecialNodeStore.Snapshot specialNodes;
+        private final AtomicBoolean consumed =
+                new AtomicBoolean();
 
         private VirtualSnapshot(UUID originManager, long worldEpoch, UUID owner, long revision,
                                 long sessionGeneration, long registryVersion, long layoutFingerprint,
                                 int recipeVersion, UUID transaction,
                                 long symbolGeneration, long transactionSeed, CloudworksData cloud, Map<UUID, NBTTagCompound> lines,
-                                boolean frozenPublication) {
+                                boolean frozenPublication, CloudworksSpecialNodeStore.Snapshot specialNodes) {
             this.originManager = originManager;
             this.worldEpoch = worldEpoch;
             this.owner = owner;
@@ -5791,13 +8047,18 @@ public final class CloudworksPlayerDataManager {
             this.registryVersion = registryVersion;
             this.layoutFingerprint = layoutFingerprint;
             this.recipeVersion = recipeVersion;
-            this.upgradeSettings = mekanism.cloudworks.common.upgrade.CloudworksUpgradeEffects.settings();
+            this.upgradeSettings = CloudworksUpgradeEffects.settings();
             this.transaction = transaction;
             this.symbolGeneration = symbolGeneration;
             this.transactionSeed = transactionSeed;
             this.cloud = cloud.copyForRuntime();
+            this.specialNodes = specialNodes;
             this.lines = new LinkedHashMap<>();
-            lines.forEach((id, tag) -> this.lines.put(id, frozenPublication ? tag : tag.copy()));
+            lines.forEach((id, tag) -> {
+                NBTTagCompound frozen = frozenPublication ? tag : tag.copy();
+                this.lines.put(id, frozen);
+                lineBaselines.put(id, new LineBaseline(frozen));
+            });
         }
 
         public UUID owner() {
@@ -5843,25 +8104,100 @@ public final class CloudworksPlayerDataManager {
             return cloud.copyForRuntime();
         }
 
+        public CloudworksSpecialNodeStore.Snapshot specialNodes() {
+            return specialNodes;
+        }
+
         public List<ProductionLineData> lines() {
+            DEBUG_RUNTIME_LINE_DECODES.incrementAndGet();
             List<ProductionLineData> copies = new ArrayList<>(lines.size());
             for (NBTTagCompound tag : lines.values()) copies.add(ProductionLineData.read(tag.copy()));
             return copies;
         }
 
-        public void visitNodeTags(java.util.function.Consumer<NBTTagCompound> visitor) {
+        /** Cold configuration baseline; never returns the frozen publication itself. */
+        public NBTTagCompound copyLineTag(UUID id) {
+            NBTTagCompound tag = lines.get(id);
+            if (tag == null) throw new IllegalArgumentException("Unknown Runtime baseline line");
+            return tag.copy();
+        }
+
+        public LineBaseline lineBaseline(UUID id) {
+            LineBaseline baseline = lineBaselines.get(id);
+            if (baseline == null) throw new IllegalArgumentException("Unknown Runtime baseline line");
+            return baseline;
+        }
+
+        /** Small overview without copying any runtime inventory or execution tree. */
+        public static final class LineBaseline {
+            private final NBTTagCompound tag;
+            private LineBaseline(NBTTagCompound tag) { this.tag = staticLineBaseline(tag); }
+
+            private static NBTTagCompound staticLineBaseline(NBTTagCompound source) {
+                NBTTagCompound baseline = new NBTTagCompound();
+                for (String key : source.getKeySet())
+                    if (!key.equals("machines") && !key.equals("channels") && !key.equals("links")
+                            && !key.equals("auxiliaries") && !key.equals("energy")
+                            && !key.equals("maxEnergy") && !key.equals("generation"))
+                        baseline.setTag(key, source.getTag(key));
+                baseline.setTag("machines", filtered(source.getTagList("machines", 10), Arrays.asList(
+                        "active", "progress", "totalTicks", "state", "outputSequence", "processCredits",
+                        "processingBatches", "executionBranches", "generationRemainders", "moduleCostRemainders",
+                        "thermalState", "inputs", "outputs", "templates", "operation")));
+                baseline.setTag("channels", filtered(source.getTagList("channels", 10), Collections.singletonList("buffer")));
+                baseline.setTag("links", filtered(source.getTagList("links", 10), Collections.singletonList("ratioRemainder")));
+                baseline.setTag("auxiliaries", filtered(source.getTagList("auxiliaries", 10),
+                        Arrays.asList("input", "costRemainders")));
+                return baseline;
+            }
+
+            private static NBTTagList filtered(NBTTagList source, List<String> removed) {
+                NBTTagList result = new NBTTagList();
+                for (int index = 0; index < source.tagCount(); index++) {
+                    NBTTagCompound value = source.getCompoundTagAt(index), retained = new NBTTagCompound();
+                    for (String key : value.getKeySet())
+                        if (!removed.contains(key)) retained.setTag(key, value.getTag(key));
+                    result.appendTag(retained);
+                }
+                return result;
+            }
+
+            public NBTTagCompound copyTag() { return tag.copy(); }
+
+            public NBTTagCompound copyOverview() {
+            NBTTagCompound source = tag;
+            if (source == null) throw new IllegalArgumentException("Unknown Runtime baseline line");
+            NBTTagCompound header = new NBTTagCompound();
+            for (String key : source.getKeySet())
+                if (!key.equals("machines") && !key.equals("channels") && !key.equals("links") && !key.equals("auxiliaries"))
+                    header.setTag(key, source.getTag(key).copy());
+            NBTTagList nodes = source.getTagList("machines", 10), icon = new NBTTagList();
+            if (nodes.tagCount() > 0) {
+                NBTTagCompound first = new NBTTagCompound();
+                first.setTag("machine", nodes.getCompoundTagAt(0).getCompoundTag("machine").copy());
+                icon.appendTag(first);
+            }
+            header.setTag("machines", icon);
+            header.setInteger("runtimeMachineCount", nodes.tagCount());
+            return header;
+            }
+
+            public NBTTagList copyChannels() { return tag.getTagList("channels", 10).copy(); }
+        }
+
+        public void visitNodeTags(Consumer<NBTTagCompound> visitor) {
             for (NBTTagCompound line : lines.values()) {
                 NBTTagList nodes = line.getTagList("machines", 10);
                 for (int index = 0; index < nodes.tagCount(); index++) visitor.accept(nodes.getCompoundTagAt(index));
             }
         }
 
-        public void visitDescriptorTags(java.util.function.Consumer<NBTTagCompound> visitor) {
+        public void visitDescriptorTags(Consumer<NBTTagCompound> visitor) {
             for (NBTTagCompound line : lines.values()) visitDescriptorTree(line, visitor);
         }
 
-        private static void visitDescriptorTree(net.minecraft.nbt.NBTBase value,
-                java.util.function.Consumer<NBTTagCompound> visitor) {
+        private static void visitDescriptorTree(NBTBase value,
+                                                Consumer<NBTTagCompound> visitor) {
             if (value instanceof NBTTagCompound tag) {
                 if (tag.hasKey("descriptor", 10)) visitor.accept(tag.getCompoundTag("descriptor"));
                 if (tag.hasKey("resourceFilter", 10)) visitor.accept(tag.getCompoundTag("resourceFilter"));
@@ -5874,11 +8210,13 @@ public final class CloudworksPlayerDataManager {
 
         public boolean hasHeatFuel() {
             boolean[] heat = new boolean[1];
-            java.util.function.Predicate<NBTTagCompound> needsFuel = CloudworksNativeContracts.thermalFuelMatcher();
+            Predicate<NBTTagCompound> needsFuel = CloudworksNativeContracts.thermalFuelMatcher();
             visitNodeTags(tag -> {
                 if (heat[0]) return;
                 NBTTagCompound machine = tag.getCompoundTag("machine");
                 heat[0] = needsFuel.test(machine);
+                if (!heat[0] && tag.hasKey("customUpgrades", 10))
+                    heat[0] = CloudworksNativeContracts.moduleHeatFuel(tag);
             });
             return heat[0];
         }

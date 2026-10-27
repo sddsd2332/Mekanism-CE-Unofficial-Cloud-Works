@@ -4,15 +4,16 @@ import crafttweaker.CraftTweakerAPI;
 import crafttweaker.annotations.ZenRegister;
 import crafttweaker.api.item.IItemStack;
 import crafttweaker.api.minecraft.CraftTweakerMC;
-import mekanism.cloudworks.common.integration.CloudworksScriptMachines;
-import mekanism.cloudworks.common.registry.CloudworksMachineAdapters;
-import mekanism.cloudworks.common.registry.CloudworksRegistries;
-import mekanism.cloudworks.common.registry.MachineExecutionProfile;
-import mekanism.cloudworks.common.slot.MachineSlotLayout;
+import mekanism.cloudworks.api.CloudworksAPI;
+import mekanism.cloudworks.api.machine.CloudworksMachineDefinition;
+import mekanism.cloudworks.api.machine.MachineIdentityPolicy;
+import mekanism.cloudworks.api.machine.MachineExecutionProfile;
+import mekanism.cloudworks.api.machine.MachineSlotLayout;
 import net.minecraft.item.ItemStack;
 import net.minecraftforge.oredict.OreDictionary;
 import stanhebben.zenscript.annotations.ZenClass;
 import stanhebben.zenscript.annotations.ZenMethod;
+import java.util.Objects;
 
 @ZenClass("mods.cloudworks.Machines")
 @ZenRegister
@@ -33,7 +34,7 @@ public final class CloudworksMachines {
     public static void registerAlias(IItemStack alias, IItemStack target) {
         ItemStack from = stack(alias), to = stack(target);
         CloudworksScriptAction.submit("Cloudworks alias " + from + " -> " + to,
-                () -> CloudworksRegistries.registerAlias(from, to), true);
+                () -> CloudworksAPI.registerMachineAlias(from, to), true);
     }
 
     @ZenMethod
@@ -41,9 +42,13 @@ public final class CloudworksMachines {
             int ticks, CloudworksSlots slots) {
         ItemStack machine = stack(item);
         MachineExecutionProfile profile = profile(parallel, energyPerTick, energyCapacity, ticks);
-        MachineSlotLayout layout = java.util.Objects.requireNonNull(slots, "slots").snapshot();
-        CloudworksScriptAction.submit("Cloudworks register machine " + machine,
-                () -> CloudworksScriptMachines.register(machine, profile, layout));
+        MachineSlotLayout layout = Objects.requireNonNull(slots, "slots").snapshot();
+        CloudworksScriptAction.submit("Cloudworks register machine " + machine, () -> {
+            if (CloudworksAPI.machineInfo(machine).registered())
+                throw new IllegalArgumentException("Machine already registered");
+            CloudworksAPI.registerMachine(CloudworksMachineDefinition.deferred(machine, profile, layout,
+                    MachineIdentityPolicy.exactNbt()));
+        });
     }
 
     @ZenMethod
@@ -51,7 +56,7 @@ public final class CloudworksMachines {
         ItemStack machine = stack(item);
         MachineExecutionProfile profile = profile(parallel, energyPerTick, energyCapacity, ticks);
         CloudworksScriptAction.submit("Cloudworks machine profile " + machine,
-                () -> CloudworksScriptMachines.profile(machine, profile));
+                () -> CloudworksAPI.updateMachineProfile(machine, profile));
     }
 
     @ZenMethod
@@ -60,7 +65,21 @@ public final class CloudworksMachines {
         ItemStack machine = stack(item), template = stack(target);
         MachineExecutionProfile profile = profile(parallel, energyPerTick, energyCapacity, ticks);
         CloudworksScriptAction.submit("Cloudworks template " + machine + " from " + template,
-                () -> CloudworksScriptMachines.registerFrom(machine, template, profile));
+                () -> CloudworksAPI.registerMachineFrom(machine, template, profile), true);
+    }
+
+    /** Per-physical-machine line allowance; zero refuses that axis. */
+    @ZenMethod
+    public static void setLineUpgradePolicy(IItemStack item, int speedUnits, int energyUnits) {
+        ItemStack machine = stack(item);
+        if (speedUnits < 0 || energyUnits < 0) throw new IllegalArgumentException("Negative line upgrade allowance");
+        var policy = mekanism.cloudworks.api.machine.MachineLineUpgradePolicy.of(
+                speedUnits > 0, energyUnits > 0, speedUnits, energyUnits);
+        CloudworksScriptAction.submit("Cloudworks line upgrade policy " + machine, () -> {
+            MachineExecutionProfile current = CloudworksAPI.machineInfo(machine).profile();
+            if (current == null) throw new IllegalArgumentException("Machine is not registered");
+            CloudworksAPI.updateMachineProfile(machine, current.withLineUpgradePolicy(policy));
+        });
     }
 
     private static MachineExecutionProfile profile(int parallel, double energy, double capacity, int ticks) {
@@ -69,17 +88,17 @@ public final class CloudworksMachines {
     }
 
     @ZenMethod
-    public static boolean isRegistered(IItemStack item) { return CloudworksRegistries.isRegistered(stack(item)); }
+    public static boolean isRegistered(IItemStack item) { return CloudworksAPI.machineInfo(stack(item)).registered(); }
 
     @ZenMethod
     public static IItemStack getAliasTarget(IItemStack item) {
-        ItemStack target = CloudworksRegistries.aliasTarget(stack(item));
+        ItemStack target = CloudworksAPI.machineInfo(stack(item)).aliasTarget();
         return target.isEmpty() ? null : CraftTweakerMC.getIItemStack(target);
     }
 
     @ZenMethod
     public static String[] getPorts(IItemStack item) {
-        MachineSlotLayout layout = CloudworksRegistries.slots(stack(item));
+        MachineSlotLayout layout = CloudworksAPI.machineInfo(stack(item)).slots();
         if (layout == null) return new String[0];
         return layout.slots().stream().map(slot -> slot.id() + ":" + slot.role() + ":" + slot.codecId()
                 + ":" + slot.capacity()).toArray(String[]::new);
@@ -87,41 +106,46 @@ public final class CloudworksMachines {
 
     @ZenMethod
     public static String getProfile(IItemStack item) {
-        MachineExecutionProfile profile = CloudworksRegistries.profile(stack(item));
+        MachineExecutionProfile profile = CloudworksAPI.machineInfo(stack(item)).profile();
         return profile == null ? "" : "parallel=" + profile.threads() + ", energyPerTick=" + profile.energyPerTick()
                 + ", energyCapacity=" + profile.energyCapacity() + ", ticks=" + profile.totalTicks();
     }
 
     @ZenMethod
     public static int getParallel(IItemStack item) {
-        MachineExecutionProfile profile = CloudworksRegistries.profile(stack(item));
+        MachineExecutionProfile profile = CloudworksAPI.machineInfo(stack(item)).profile();
         return profile == null ? 0 : profile.threads();
     }
 
     @ZenMethod
     public static double getEnergyPerTick(IItemStack item) {
-        MachineExecutionProfile profile = CloudworksRegistries.profile(stack(item));
+        MachineExecutionProfile profile = CloudworksAPI.machineInfo(stack(item)).profile();
         return profile == null ? 0 : profile.energyPerTick();
     }
 
     @ZenMethod
     public static double getEnergyCapacity(IItemStack item) {
-        MachineExecutionProfile profile = CloudworksRegistries.profile(stack(item));
+        MachineExecutionProfile profile = CloudworksAPI.machineInfo(stack(item)).profile();
         return profile == null ? 0 : profile.energyCapacity();
     }
 
     @ZenMethod
     public static int getTicks(IItemStack item) {
-        MachineExecutionProfile profile = CloudworksRegistries.profile(stack(item));
+        MachineExecutionProfile profile = CloudworksAPI.machineInfo(stack(item)).profile();
         return profile == null ? 0 : profile.totalTicks();
     }
 
     @ZenMethod
     public static void dump() {
         CloudworksScriptAction.submit("Cloudworks registered machine diagnostics", () ->
-                CloudworksRegistries.profileSnapshot().forEach((key, profile) ->
-                        CraftTweakerAPI.logInfo(key.displayStack() + " | " + getProfile(CraftTweakerMC.getIItemStack(key.displayStack()))
-                                + " | adapters=" + CloudworksMachineAdapters.getAll(key).size()
-                                + " | generator=" + (CloudworksRegistries.energyGenerator(key) != null))), true);
+                CloudworksAPI.machineInfos().forEach(machine -> CraftTweakerAPI.logInfo(
+                        machine.machine() + " | " + describe(machine.profile())
+                                + " | adapters=" + machine.adapterCount()
+                                + " | generator=" + machine.hasEnergyGenerator())), true);
+    }
+
+    private static String describe(MachineExecutionProfile profile) {
+        return profile == null ? "" : "parallel=" + profile.threads() + ", energyPerTick=" + profile.energyPerTick()
+                + ", energyCapacity=" + profile.energyCapacity() + ", ticks=" + profile.totalTicks();
     }
 }

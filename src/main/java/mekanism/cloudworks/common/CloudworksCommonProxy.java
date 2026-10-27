@@ -1,6 +1,7 @@
 package mekanism.cloudworks.common;
 
 import mekanism.cloudworks.common.inventory.ContainerCloudworks;
+import mekanism.cloudworks.common.team.CloudworksTeamContext;
 import mekanism.cloudworks.common.registries.CloudworksItems;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.inventory.Container;
@@ -8,8 +9,23 @@ import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
 import net.minecraftforge.fml.common.network.IGuiHandler;
+import java.util.UUID;
+import mekanism.cloudworks.common.content.CloudworksTerminalHost;
+import mekanism.cloudworks.common.content.CloudworksTerminalItemHost;
+import mekanism.cloudworks.common.inventory.container.ContainerCloudInputPort;
+import mekanism.cloudworks.common.inventory.container.ContainerCloudOutputPort;
+import mekanism.cloudworks.common.inventory.container.ContainerCloudworksTeamRecovery;
+import mekanism.cloudworks.common.inventory.ContainerCloudTeamJoin;
+import mekanism.cloudworks.common.tile.TileEntityCloudDashboard;
+import mekanism.cloudworks.common.tile.TileEntityCloudInput;
+import mekanism.cloudworks.common.tile.TileEntityCloudOutput;
+import mekanism.cloudworks.common.tile.TileEntityCloudworksTeamRecovery;
+import mekanism.common.base.IGuiProvider;
+import mekanism.common.inventory.container.item.ItemStackSlotAccess;
+import net.minecraft.item.ItemStack;
+import net.minecraft.util.EnumHand;
 
-public class CloudworksCommonProxy implements mekanism.common.base.IGuiProvider, IGuiHandler {
+public class CloudworksCommonProxy implements IGuiProvider, IGuiHandler {
     public void preInit() {
     }
 
@@ -23,23 +39,37 @@ public class CloudworksCommonProxy implements mekanism.common.base.IGuiProvider,
         }
         if (id == 1) {
             TileEntity tile = world.getTileEntity(pos);
-            if (tile instanceof mekanism.cloudworks.common.tile.TileEntityCloudInput input) {
-                return new mekanism.cloudworks.common.inventory.container.ContainerCloudInputPort(player.inventory, input);
+            if (tile instanceof TileEntityCloudInput input) {
+                return new ContainerCloudInputPort(player.inventory, input);
             }
         }
         if (id == 2) {
             TileEntity tile = world.getTileEntity(pos);
-            if (tile instanceof mekanism.cloudworks.common.tile.TileEntityCloudOutput output) {
-                return new mekanism.cloudworks.common.inventory.container.ContainerCloudOutputPort(player.inventory, output);
+            if (tile instanceof TileEntityCloudOutput output) {
+                return new ContainerCloudOutputPort(player.inventory, output);
+            }
+        }
+        if (id == 5) {
+            TileEntity tile = world.getTileEntity(pos);
+            if (tile instanceof TileEntityCloudworksTeamRecovery recovery) {
+                return new ContainerCloudworksTeamRecovery(player.inventory, recovery);
             }
         }
         if (id == 3) {
             TileEntity tile = world.getTileEntity(pos);
-            if (tile instanceof mekanism.cloudworks.common.tile.TileEntityCloudDashboard dashboard
+            if (tile instanceof TileEntityCloudDashboard dashboard
                     && CloudworksEntry.canOpenDashboard(player, dashboard)) {
                 return new ContainerCloudworks(player.inventory, dashboard);
             }
         }
+        if (id == 4) {
+            UUID teamOwner = CloudworksTeamContext.owner(player);
+            if (teamOwner == null || !CloudworksTeamContext.canAccess(player, teamOwner)) return null;
+            return new ContainerCloudworks(player.inventory, heldTerminalHost(player), teamOwner, true);
+        }
+        if (id == 6 && CloudworksTeamContext.owner(player) == null
+                && player.getHeldItemMainhand().getItem() == CloudworksItems.TeamTerminal)
+            return new ContainerCloudTeamJoin(player.inventory);
         return null;
     }
 
@@ -47,18 +77,20 @@ public class CloudworksCommonProxy implements mekanism.common.base.IGuiProvider,
      * Terminal-slot host bound to the opener's held portable terminal (both
      * sides construct identically so the slots line up for vanilla sync).
      */
-    public static mekanism.cloudworks.common.content.CloudworksTerminalHost heldTerminalHost(EntityPlayer player) {
-        net.minecraft.item.ItemStack held = player.getHeldItemMainhand();
-        if (held.getItem() != CloudworksItems.PortableTerminal) return null;
-        mekanism.common.inventory.container.item.ItemStackSlotAccess itemAccess = new mekanism.common.inventory.container.item.ItemStackSlotAccess(player.inventory,
-                        net.minecraft.util.EnumHand.MAIN_HAND, player.inventory.currentItem, held);
-        return new mekanism.cloudworks.common.content.CloudworksTerminalItemHost(player, itemAccess);
+    public static CloudworksTerminalHost heldTerminalHost(EntityPlayer player) {
+        ItemStack held = player.getHeldItemMainhand();
+        if (held.getItem() != CloudworksItems.PortableTerminal
+                && held.getItem() != CloudworksItems.TeamTerminal) return null;
+        ItemStackSlotAccess itemAccess = new ItemStackSlotAccess(player.inventory,
+                        EnumHand.MAIN_HAND, player.inventory.currentItem, held);
+        return new CloudworksTerminalItemHost(player, itemAccess);
     }
 
     public boolean isValidServerGui(int id, TileEntity tile) {
-        return id == 0 || id == 1 && tile instanceof mekanism.cloudworks.common.tile.TileEntityCloudInput
-                || id == 2 && tile instanceof mekanism.cloudworks.common.tile.TileEntityCloudOutput
-                || id == 3 && tile instanceof mekanism.cloudworks.common.tile.TileEntityCloudDashboard;
+        return id == 0 || id == 4 || id == 6 || id == 1 && tile instanceof TileEntityCloudInput
+                || id == 2 && tile instanceof TileEntityCloudOutput
+                || id == 5 && tile instanceof TileEntityCloudworksTeamRecovery
+                || id == 3 && tile instanceof TileEntityCloudDashboard;
     }
 
     @Override

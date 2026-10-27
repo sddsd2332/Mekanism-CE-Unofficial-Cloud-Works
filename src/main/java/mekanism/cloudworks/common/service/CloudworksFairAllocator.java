@@ -45,7 +45,7 @@ public final class CloudworksFairAllocator {
         public Demand(UUID lineId, Map<QIOResourceDescriptor, Long> resources) {
             if (lineId == null || resources == null) throw new IllegalArgumentException("Invalid demand");
             this.lineId = lineId;
-            this.resources = Collections.unmodifiableMap(new java.util.LinkedHashMap<>(resources));
+            this.resources = Collections.unmodifiableMap(new LinkedHashMap<>(resources));
         }
 
         public UUID lineId() {

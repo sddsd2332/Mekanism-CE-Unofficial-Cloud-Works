@@ -10,6 +10,8 @@ import mekanism.common.PacketHandler;
 import net.minecraft.entity.player.*;
 import net.minecraft.network.PacketBuffer;
 import net.minecraftforge.fml.common.network.simpleimpl.*;
+import mekanism.common.Mekanism;
+import net.minecraft.item.ItemStack;
 
 /** Explicit request/response data, scoped to the terminal and its edit token. */
 public final class PacketCloudworksBlueprint {
@@ -144,7 +146,7 @@ public final class PacketCloudworksBlueprint {
                     result.entries.add(new Metadata(CloudworksGuiCodec.uuid(b), CloudworksGuiCodec.uuid(b),
                             b.readString(64), b.readString(64), b.readLong(), b.readBoolean()));
                 for (int count = CloudworksLineDraftCodec.count(b, b.readableBytes() / 16); count > 0; count--) {
-                    net.minecraft.item.ItemStack stack = CloudworksGuiCodec.readStack(b);
+                    ItemStack stack = CloudworksGuiCodec.readStack(b);
                     long required = b.readLong(), missing = b.readLong();
                     if (stack.isEmpty() || required <= 0 || missing < 0 || missing > required) throw CloudworksBlueprint.invalid();
                     result.requirements.add(new BlueprintRequirement(stack, required, missing));
@@ -153,8 +155,8 @@ public final class PacketCloudworksBlueprint {
                 valid = !b.isReadable() && result.pageOffset >= 0 && result.nextOffset >= result.pageOffset
                         && result.entries.size() <= CloudworksBlueprintLibrary.PAGE_SIZE;
             } catch (RuntimeException invalid) {
-                if (mekanism.common.Mekanism.logger != null)
-                    mekanism.common.Mekanism.logger.debug("Rejected malformed Cloudworks blueprint response", invalid);
+                if (Mekanism.logger != null)
+                    Mekanism.logger.debug("Rejected malformed Cloudworks blueprint response", invalid);
                 valid = false;
             }
         }

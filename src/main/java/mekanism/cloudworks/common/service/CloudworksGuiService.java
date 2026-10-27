@@ -12,6 +12,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import mekanism.cloudworks.common.network.CloudworksGuiCodec;
 import mekanism.cloudworks.common.network.PacketCloudworksData;
 import mekanism.cloudworks.common.network.data.CloudworksGuiData;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.concurrent.Callable;
 
 /** Bounded cold projection workers, separate from simulation workers. */
 public final class CloudworksGuiService implements AutoCloseable {
@@ -39,7 +42,7 @@ public final class CloudworksGuiService implements AutoCloseable {
         return submit(request::execute);
     }
 
-    private <T> FutureTask<T> submit(java.util.concurrent.Callable<T> computation) {
+    private <T> FutureTask<T> submit(Callable<T> computation) {
         if (closed) return null;
         FutureTask<T> task = new FutureTask<T>(computation) {
             @Override protected void done() { pending.remove(this); }
@@ -62,7 +65,7 @@ public final class CloudworksGuiService implements AutoCloseable {
             if (request.source == null) throw new IllegalStateException("GUI source unavailable");
             data = CloudworksGuiDataBuilder.build(request.source, request.offset, request.graphLine,
                     request.cacheType, request.warehouses, request.recycle, request.choices,
-                    request.resourceOffset, request.resourceTotal, request.resourceContext);
+                    request.resourceOffset, request.resourceTotal, request.resourceContext, request.catalog);
             encoded = CloudworksGuiCodec.encode(data);
         } catch (RuntimeException failed) {
             data = CloudworksGuiData.EMPTY;
@@ -98,7 +101,7 @@ public final class CloudworksGuiService implements AutoCloseable {
         private Result(CloudworksGuiData data, byte[][] encoded, List<PacketCloudworksData.Message> packets) {
             this.data = data;
             this.encoded = encoded;
-            this.packets = java.util.Collections.unmodifiableList(new java.util.ArrayList<>(packets));
+            this.packets = Collections.unmodifiableList(new ArrayList<>(packets));
         }
     }
 }

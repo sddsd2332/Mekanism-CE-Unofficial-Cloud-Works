@@ -1,5 +1,6 @@
 package mekanism.cloudworks.common.registry;
 
+import mekanism.cloudworks.api.machine.MachineIdentityPolicy;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
@@ -8,29 +9,24 @@ public final class MachineKey {
     private final Item item;
     private final int metadata;
     private final NBTTagCompound identityNbt;
+    private final MachineIdentityPolicy identityPolicy;
 
-    private MachineKey(Item item, int metadata, NBTTagCompound identityNbt) {
+    private MachineKey(Item item, int metadata, NBTTagCompound identityNbt, MachineIdentityPolicy identityPolicy) {
         this.item = item;
         this.metadata = metadata;
         this.identityNbt = identityNbt;
-    }
-
-    public static MachineKey of(ItemStack stack) {
-        return of(stack, MachineIdentityPolicy.none());
+        this.identityPolicy = identityPolicy;
     }
 
     public static MachineKey of(ItemStack stack, MachineIdentityPolicy policy) {
         if (stack == null || stack.isEmpty()) throw new IllegalArgumentException("Machine stack cannot be empty");
-        return new MachineKey(stack.getItem(), stack.getMetadata(), normalizeIdentityNbt(stack.getTagCompound(), policy));
-    }
-
-    private static NBTTagCompound normalizeIdentityNbt(NBTTagCompound source, MachineIdentityPolicy policy) {
-        if (policy.isExactNbt()) return policy.select(source);
-        return policy.select(source);
+        return new MachineKey(stack.getItem(), stack.getMetadata(), policy.select(stack), policy);
     }
 
     public static MachineKey serialized(MachineKey template, NBTTagCompound tag, MachineIdentityPolicy policy) {
-        return new MachineKey(template.item, template.metadata, normalizeIdentityNbt(tag, policy));
+        ItemStack stack = new ItemStack(template.item, 1, template.metadata);
+        if (tag != null && !tag.getKeySet().isEmpty()) stack.setTagCompound(tag.copy());
+        return new MachineKey(template.item, template.metadata, policy.select(stack), policy);
     }
 
     @Override
@@ -46,7 +42,7 @@ public final class MachineKey {
 
     public ItemStack displayStack() {
         ItemStack stack = new ItemStack(item, 1, metadata);
-        if (!identityNbt.getKeySet().isEmpty()) stack.setTagCompound(identityNbt.copy());
+        identityPolicy.apply(stack, identityNbt);
         return stack;
     }
 }

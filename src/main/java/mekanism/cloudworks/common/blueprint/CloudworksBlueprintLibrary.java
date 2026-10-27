@@ -5,6 +5,10 @@ import java.nio.file.*;
 import java.util.*;
 import net.minecraft.nbt.*;
 import mekanism.common.Mekanism;
+import java.nio.channels.FileChannel;
+import java.util.zip.GZIPInputStream;
+import mekanism.cloudworks.common.network.CloudworksGuiCodec;
+import mekanism.cloudworks.common.network.CloudworksLineDraftCodec;
 
 /** Server-wide asset library. All access comes from structural workers, never the tick thread. */
 public final class CloudworksBlueprintLibrary {
@@ -41,7 +45,9 @@ public final class CloudworksBlueprintLibrary {
             for (Path path : paths) {
                 String name = path.getFileName().toString();
                 try { UUID.fromString(name.substring(0, name.length() - 4)); files.add(path); }
-                catch (RuntimeException ignored) { }
+                catch (RuntimeException ignored) {
+                    if (Mekanism.logger != null) Mekanism.logger.debug("Skipping non-UUID blueprint file {}", path, ignored);
+                }
             }
         } catch (IOException failure) { throw storage(failure); }
         Map<Path, Long> modified = new HashMap<>();
@@ -56,7 +62,7 @@ public final class CloudworksBlueprintLibrary {
             Path path = files.get(index);
             UUID id = UUID.fromString(path.getFileName().toString().replace(".dat", ""));
             try { entries.add(new Entry(id, read(id))); }
-            catch (mekanism.cloudworks.common.network.CloudworksLineDraftCodec.UnsupportedBlueprintVersionException ignored) {
+            catch (CloudworksLineDraftCodec.UnsupportedBlueprintVersionException ignored) {
                 if (Mekanism.logger != null) Mekanism.logger.debug("Skipping legacy Cloudworks blueprint {}", path);
             }
             catch (RuntimeException failure) {
@@ -74,7 +80,7 @@ public final class CloudworksBlueprintLibrary {
             for (Path file : files) try {
                 UUID id = UUID.fromString(file.getFileName().toString().replace(".dat", ""));
                 entries.add(new Entry(id, read(id)));
-            } catch (mekanism.cloudworks.common.network.CloudworksLineDraftCodec.UnsupportedBlueprintVersionException ignored) {
+            } catch (CloudworksLineDraftCodec.UnsupportedBlueprintVersionException ignored) {
                 if (Mekanism.logger != null) Mekanism.logger.debug("Skipping legacy Cloudworks blueprint {}", file);
             } catch (RuntimeException failure) {
                 if (Mekanism.logger != null) Mekanism.logger.warn("Rejected Cloudworks blueprint {}", file, failure);
@@ -86,9 +92,9 @@ public final class CloudworksBlueprintLibrary {
 
     public synchronized CloudworksBlueprint read(UUID id) {
         try (InputStream in = Files.newInputStream(file(id))) {
-            if (Files.size(file(id)) > mekanism.cloudworks.common.network.CloudworksGuiCodec.MAX_BYTES) throw CloudworksBlueprint.invalid();
-            NBTTagCompound tag = CompressedStreamTools.read(new DataInputStream(new java.util.zip.GZIPInputStream(in)),
-                    new NBTSizeTracker(mekanism.cloudworks.common.network.CloudworksGuiCodec.MAX_BYTES + 262144));
+            if (Files.size(file(id)) > CloudworksGuiCodec.MAX_BYTES) throw CloudworksBlueprint.invalid();
+            NBTTagCompound tag = CompressedStreamTools.read(new DataInputStream(new GZIPInputStream(in)),
+                    new NBTSizeTracker(CloudworksGuiCodec.MAX_BYTES + 262144));
             if (!id.toString().equals(tag.getString("id"))) throw CloudworksBlueprint.invalid();
             return CloudworksBlueprint.read(tag.getCompoundTag("payload"));
         } catch (NoSuchFileException missing) {
@@ -136,13 +142,19 @@ public final class CloudworksBlueprintLibrary {
             try (FileOutputStream out = new FileOutputStream(temp.toFile())) {
                 CompressedStreamTools.writeCompressed(tag, out);
             }
-            try (java.nio.channels.FileChannel channel = java.nio.channels.FileChannel.open(temp, StandardOpenOption.WRITE)) {
+            try (FileChannel channel = FileChannel.open(temp, StandardOpenOption.WRITE)) {
                 channel.force(true);
             }
             Files.move(temp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             return id;
         } catch (IOException failure) { throw storage(failure); }
-        finally { if (temp != null) try { Files.deleteIfExists(temp); } catch (IOException ignored) {} }
+        finally {
+            if (temp != null) try {
+                Files.deleteIfExists(temp);
+            } catch (IOException ignored) {
+                if (Mekanism.logger != null) Mekanism.logger.debug("Could not remove temporary blueprint file {}", temp, ignored);
+            }
+        }
     }
 
     public synchronized void delete(UUID id, UUID actor, boolean operator) {

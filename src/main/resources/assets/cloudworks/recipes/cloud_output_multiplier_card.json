@@ -1,0 +1,11 @@
+{
+  "type": "forge:ore_shaped",
+  "pattern": ["AEA", "DCD", "AEA"],
+  "key": {
+    "A": { "item": "mekanism:atomicalloy" },
+    "E": { "item": "mekanism:enrichedalloy" },
+    "D": { "type": "forge:ore_dict", "ore": "gemDiamond" },
+    "C": { "item": "mekanism:controlcircuit", "data": 3 }
+  },
+  "result": { "item": "cloudworks:cloud_output_multiplier_card" }
+}

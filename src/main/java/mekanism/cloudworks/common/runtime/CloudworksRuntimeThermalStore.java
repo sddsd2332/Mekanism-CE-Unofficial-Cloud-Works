@@ -1,6 +1,6 @@
 package mekanism.cloudworks.common.runtime;
 
-import mekanism.cloudworks.api.CloudworksThermalPlan;
+import mekanism.cloudworks.api.machine.CloudworksThermalPlan;
 import mekanism.cloudworks.common.data.CloudworksThermalState;
 
 /** Primitive arrays owned by one Runtime, including prepaid fuel and fusion plasma. */
@@ -24,7 +24,9 @@ public final class CloudworksRuntimeThermalStore {
             heat[node] = finite(300 * capacity[node]);
             plasma[node] = finite(300 * plan.plasmaCapacity * count);
         } else {
-            heat[node] = state.heat; plasma[node] = state.plasma; fuel[node] = state.fuelTicks;
+            heat[node] = Math.max(0, finite(state.heat + 300 * Math.max(0, capacity[node] - state.capacity))
+                    - 300 * Math.max(0, state.capacity - capacity[node]));
+            plasma[node] = state.plasma; fuel[node] = state.fuelTicks;
             credit[node] = state.credit; burning[node] = state.burning;
         }
         touch(node);

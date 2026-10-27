@@ -2,6 +2,8 @@ package mekanism.cloudworks.common.data;
 
 import mekanism.api.qio.resource.QIOResourceDescriptor;
 import net.minecraft.nbt.NBTTagCompound;
+import mekanism.cloudworks.common.service.CloudworksNativeContracts;
+import net.minecraft.nbt.NBTTagList;
 
 final class CloudworksDataChecks {
     private CloudworksDataChecks() {}
@@ -15,9 +17,9 @@ final class CloudworksDataChecks {
         if (!tag.hasKey(name, type)) throw new IllegalArgumentException("Missing or invalid cloudworks field: " + name);
     }
 
-    static net.minecraft.nbt.NBTTagList list(NBTTagCompound tag, String name, int elementType) {
+    static NBTTagList list(NBTTagCompound tag, String name, int elementType) {
         field(tag, name, 9);
-        net.minecraft.nbt.NBTTagList list = (net.minecraft.nbt.NBTTagList) tag.getTag(name);
+        NBTTagList list = (NBTTagList) tag.getTag(name);
         if (list.tagCount() != 0 && list.getTagType() != elementType)
             throw new IllegalArgumentException("Invalid cloudworks list element type: " + name);
         return list;
@@ -28,8 +30,8 @@ final class CloudworksDataChecks {
     }
 
     static QIOResourceDescriptor descriptor(NBTTagCompound tag) {
-        if (mekanism.cloudworks.common.service.CloudworksNativeContracts.isWorker())
-            return mekanism.cloudworks.common.service.CloudworksNativeContracts.resource(tag);
+        if (CloudworksNativeContracts.isWorker())
+            return CloudworksNativeContracts.resource(tag);
         QIOResourceDescriptor result = QIOResourceDescriptor.read(tag);
         if (!result.isResolved()) throw new IllegalArgumentException("Unresolved cloudworks resource");
         return result;

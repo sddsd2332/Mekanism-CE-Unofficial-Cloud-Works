@@ -23,4 +23,6 @@ public abstract class CloudworksMultiblockRecipeAdapter extends CloudworksNative
 
     @Override
     protected int duration(CloudworksContractRecipeAdapter.Contract recipe, int fallback) { return recipe.ticks; }
+
+    @Override protected String recipeIdentity(CloudworksContractRecipeAdapter.Contract recipe) { return recipe.id; }
 }

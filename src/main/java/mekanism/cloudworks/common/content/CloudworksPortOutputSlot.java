@@ -8,12 +8,13 @@ import net.minecraft.nbt.NBTTagCompound;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import java.util.function.BooleanSupplier;
 
 /**
  * Port output item slot: output semantics (external automation may extract; only
  * the port logic inserts) with a 8192 storage limit, following the
  * {@code FactoryExtraInventorySlot}/{@code BinInventorySlot} pattern — only the
- * limit changes, no insertion/extraction behavior is overridden. The container
+ * limit changes; an optional team-lifecycle predicate can pause extraction. The container
  * slot carries the overstacked count through vanilla sync inside an NBT tag
  * (SYNC_COUNT pattern).
  */
@@ -28,13 +29,22 @@ public class CloudworksPortOutputSlot extends BasicInventorySlot {
     private static final String SYNC_COUNT = "CloudworksPortOutputCount";
 
     private CloudworksPortOutputSlot(@Nullable IContentsListener listener, int x, int y) {
-        super(LIMIT, BasicInventorySlot.alwaysTrueBi, BasicInventorySlot.internalOnly,
+        this(() -> true, listener, x, y);
+    }
+
+    private CloudworksPortOutputSlot(BooleanSupplier enabled, @Nullable IContentsListener listener, int x, int y) {
+        super(LIMIT, (stack, automation) -> enabled.getAsBoolean(), BasicInventorySlot.internalOnly,
                 BasicInventorySlot.alwaysTrue, listener, x, y);
         obeyStackLimit = false;
     }
 
     public static CloudworksPortOutputSlot at(@Nullable IContentsListener listener, int x, int y) {
         return new CloudworksPortOutputSlot(listener, x, y);
+    }
+
+    public static CloudworksPortOutputSlot at(BooleanSupplier enabled,
+            @Nullable IContentsListener listener, int x, int y) {
+        return new CloudworksPortOutputSlot(enabled, listener, x, y);
     }
 
     @Override

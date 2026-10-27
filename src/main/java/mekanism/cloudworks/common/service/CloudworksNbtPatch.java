@@ -8,7 +8,7 @@ import net.minecraft.nbt.*;
 final class CloudworksNbtPatch {
     static NBTTagCompound between(NBTBase before, NBTBase after) {
         NBTTagCompound patch = new NBTTagCompound();
-        if (after.equals(before)) return patch;
+        if (after == before) return patch;
         if (before instanceof NBTTagCompound && after instanceof NBTTagCompound) {
             NBTTagCompound previous = (NBTTagCompound) before, next = (NBTTagCompound) after;
             NBTTagCompound fields = new NBTTagCompound();
@@ -18,22 +18,29 @@ final class CloudworksNbtPatch {
             for (String key : keys) {
                 NBTBase value = next.getTag(key);
                 if (value == null) removed.appendTag(new NBTTagString(key));
-                else if (!value.equals(previous.getTag(key)))
-                    fields.setTag(key, between(previous.getTag(key), value));
+                else {
+                    NBTTagCompound difference = between(previous.getTag(key), value);
+                    if (!difference.isEmpty()) fields.setTag(key, difference);
+                }
             }
-            patch.setTag("fields", fields);
-            patch.setTag("removed", removed);
+            if (!fields.isEmpty() || removed.tagCount() != 0) {
+                patch.setTag("fields", fields);
+                patch.setTag("removed", removed);
+            }
         } else if (before instanceof NBTTagList && after instanceof NBTTagList
                 && ((NBTTagList) before).getTagType() == ((NBTTagList) after).getTagType()) {
             NBTTagList previous = (NBTTagList) before, next = (NBTTagList) after;
             NBTTagCompound entries = new NBTTagCompound();
-            patch.setInteger("length", next.tagCount());
             for (int index = 0; index < next.tagCount(); index++) {
                 NBTBase old = index < previous.tagCount() ? previous.get(index) : null;
-                if (!next.get(index).equals(old)) entries.setTag(Integer.toString(index), between(old, next.get(index)));
+                NBTTagCompound difference = between(old, next.get(index));
+                if (!difference.isEmpty()) entries.setTag(Integer.toString(index), difference);
             }
-            patch.setTag("entries", entries);
-        } else patch.setTag("value", after.copy());
+            if (!entries.isEmpty() || previous.tagCount() != next.tagCount()) {
+                patch.setInteger("length", next.tagCount());
+                patch.setTag("entries", entries);
+            }
+        } else if (!after.equals(before)) patch.setTag("value", after.copy());
         return patch;
     }
 

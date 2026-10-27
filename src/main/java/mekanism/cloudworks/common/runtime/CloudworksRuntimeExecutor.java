@@ -7,14 +7,18 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.Objects;
+import java.util.Set;
+import mekanism.common.Mekanism;
 
 /** Parallel executor for player-owned Cloudworks Runtime worlds. */
 public final class CloudworksRuntimeExecutor implements AutoCloseable {
     private static final long SHUTDOWN_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(120);
     private final ThreadPoolExecutor workers;
     private final Map<UUID, CloudworksPlayerRuntime> runtimes = new ConcurrentHashMap<>();
-    private final java.util.Set<UUID> queued = ConcurrentHashMap.newKeySet();
-    private final java.util.concurrent.atomic.AtomicInteger workerIds = new java.util.concurrent.atomic.AtomicInteger();
+    private final Set<UUID> queued = ConcurrentHashMap.newKeySet();
+    private final AtomicInteger workerIds = new AtomicInteger();
 
     public CloudworksRuntimeExecutor(int workerCount) {
         if (workerCount < 1) throw new IllegalArgumentException("Invalid Runtime worker count");
@@ -31,7 +35,7 @@ public final class CloudworksRuntimeExecutor implements AutoCloseable {
     }
 
     boolean submitWork(UUID owner, Runnable work) {
-        java.util.Objects.requireNonNull(work);
+        Objects.requireNonNull(work);
         if (!queued.add(owner)) return false;
         try {
             workers.execute(() -> {
@@ -85,7 +89,8 @@ public final class CloudworksRuntimeExecutor implements AutoCloseable {
             }
         }
         if (!workers.isTerminated()) {
-            System.err.println("Cloudworks Runtime workers exceeded shutdown deadline; interrupting outstanding tasks");
+            Mekanism.logger.warn(
+                    "Cloudworks Runtime workers exceeded shutdown deadline; interrupting outstanding tasks");
             workers.shutdownNow();
         }
         runtimes.clear();

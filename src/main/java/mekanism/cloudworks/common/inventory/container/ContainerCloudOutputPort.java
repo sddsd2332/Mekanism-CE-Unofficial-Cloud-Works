@@ -1,7 +1,7 @@
 package mekanism.cloudworks.common.inventory.container;
 
 import mekanism.cloudworks.common.content.CloudworksPortOutputSlot.PortOutputContainerSlot;
-import mekanism.cloudworks.common.tile.TileEntityCloudOutput;
+import mekanism.cloudworks.common.tile.prefab.TileEntityCloudworksPort;
 import mekanism.common.inventory.container.MekanismTileContainer;
 import mekanism.common.inventory.container.SelectedWindowData;
 import mekanism.common.inventory.container.slot.VirtualInventoryContainerSlot;
@@ -19,12 +19,16 @@ import javax.annotation.Nonnull;
  * via the SYNC_COUNT pattern) plus the player inventory — the download mirror of
  * the upload-port container contract.
  */
-public class ContainerCloudOutputPort extends MekanismTileContainer<TileEntityCloudOutput> {
+public class ContainerCloudOutputPort extends MekanismTileContainer<TileEntityCloudworksPort> {
 
     private PortOutputContainerSlot[] portSlots;
 
-    public ContainerCloudOutputPort(InventoryPlayer inventory, TileEntityCloudOutput tile) {
+    public ContainerCloudOutputPort(InventoryPlayer inventory, TileEntityCloudworksPort tile) {
         super(tile, inventory);
+    }
+
+    @Override public boolean canInteractWith(@Nonnull EntityPlayer player) {
+        return tile != null && tile.isUsableByPlayer(player) && tile.canPlayerAccess(player);
     }
 
     @Override
@@ -72,6 +76,7 @@ public class ContainerCloudOutputPort extends MekanismTileContainer<TileEntityCl
     @Nonnull
     @Override
     public ItemStack slotClick(int slotId, int dragType, ClickType clickType, EntityPlayer player) {
+        if (!canInteractWith(player)) return ItemStack.EMPTY;
         if (slotId >= 0 && slotId < inventorySlots.size()) {
             Slot slot = inventorySlots.get(slotId);
             if (slot instanceof PortOutputContainerSlot portSlot) {
@@ -96,4 +101,3 @@ public class ContainerCloudOutputPort extends MekanismTileContainer<TileEntityCl
         }
     }
 }
-

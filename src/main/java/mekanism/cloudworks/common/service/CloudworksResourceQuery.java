@@ -14,6 +14,9 @@ import mekanism.cloudworks.common.data.CloudworksResourceStack;
 import mekanism.cloudworks.common.data.MachineNodeData;
 import mekanism.cloudworks.common.data.ProductionLineData;
 import mekanism.cloudworks.common.data.ProductionLineLink;
+import java.util.Comparator;
+import java.util.concurrent.CancellationException;
+import java.util.Objects;
 
 /** Server resource choices from the same frozen source used by the terminal projection. */
 public final class CloudworksResourceQuery {
@@ -23,10 +26,10 @@ public final class CloudworksResourceQuery {
     public final UUID line, context;
 
     public CloudworksResourceQuery(CloudworksGuiSource source, UUID line, UUID context, String query, int offset) {
-        this.source = java.util.Objects.requireNonNull(source);
-        this.line = java.util.Objects.requireNonNull(line);
+        this.source = Objects.requireNonNull(source);
+        this.line = Objects.requireNonNull(line);
         this.context = context;
-        this.query = java.util.Objects.requireNonNull(query).toLowerCase(Locale.ROOT);
+        this.query = Objects.requireNonNull(query).toLowerCase(Locale.ROOT);
         requestedOffset = Math.max(0, offset);
     }
 
@@ -52,12 +55,12 @@ public final class CloudworksResourceQuery {
             candidates.addAll(link.resourceFilters());
         List<QIOResourceDescriptor> matching = new ArrayList<>();
         for (QIOResourceDescriptor resource : candidates) {
-            if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
+            if (Thread.currentThread().isInterrupted()) throw new CancellationException();
             if (resource.isResolved() && (query.isEmpty()
                     || CloudworksEditorData.resourceName(resource).toLowerCase(Locale.ROOT).contains(query)
                     || resource.getCodecId().toString().toLowerCase(Locale.ROOT).contains(query))) matching.add(resource);
         }
-        matching.sort(java.util.Comparator.naturalOrder());
+        matching.sort(Comparator.naturalOrder());
         int offset = Math.min(requestedOffset, Math.max(0, matching.size() - 1)) / 64 * 64;
         return new Result(matching.subList(offset, Math.min(matching.size(), offset + 64)), offset, matching.size());
     }

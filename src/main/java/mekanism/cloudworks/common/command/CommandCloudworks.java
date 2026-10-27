@@ -15,6 +15,10 @@ import net.minecraft.util.text.TextComponentTranslation;
 
 import javax.annotation.Nullable;
 import java.util.*;
+import mekanism.cloudworks.common.runtime.CloudworksRuntimeService;
+import mekanism.cloudworks.common.service.CloudworksServerTickService;
+import mekanism.common.Mekanism;
+import net.minecraftforge.fml.common.event.FMLServerStartingEvent;
 
 /**
  * OP administration surface (spec CLOUDWORKS_COMMAND_REWORK_AND_BLUEPRINT_SPEC).
@@ -36,8 +40,9 @@ public final class CommandCloudworks extends CommandBase {
     /**
      * Server lifecycle hook; called from the mod's server-starting handler.
      */
-    public static void register(net.minecraftforge.fml.common.event.FMLServerStartingEvent event) {
+    public static void register(FMLServerStartingEvent event) {
         event.registerServerCommand(new CommandCloudworks());
+        event.registerServerCommand(new CommandCloudworksTeam());
     }
 
     private static void require(String[] args, int count) throws CommandException {
@@ -75,9 +80,9 @@ public final class CommandCloudworks extends CommandBase {
         if (args.length == 0) throw new WrongUsageException(getUsage(sender));
         switch (args[0].toLowerCase(Locale.ROOT)) {
             case "runtime" -> {
-                mekanism.cloudworks.common.service.CloudworksServerTickService service =
-                        mekanism.cloudworks.common.service.CloudworksServerTickService.INSTANCE;
-                mekanism.cloudworks.common.runtime.CloudworksRuntimeService.Stats stats = service.stats();
+                CloudworksServerTickService service =
+                        CloudworksServerTickService.INSTANCE;
+                CloudworksRuntimeService.Stats stats = service.stats();
                 sender.sendMessage(new TextComponentTranslation("commands.cloudworks.runtime_stats",
                         stats.pending(), stats.tickDebt(), stats.simulatedTicks(), stats.commits(), stats.conflicts(),
                         stats.workerFailures(), stats.persistenceWaits(), stats.projectedLines(), stats.projectedNodes()));
@@ -110,7 +115,7 @@ public final class CommandCloudworks extends CommandBase {
                     CloudworksPlayerDataManager.INSTANCE.setCloudEnabled(target.getUniqueID(), enabled);
                     if (!enabled) capability.setEnabled(false);
                 } catch (RuntimeException failure) {
-                    mekanism.common.Mekanism.logger.warn("Could not update Cloudworks state for {}", target.getName(), failure);
+                    Mekanism.logger.warn("Could not update Cloudworks state for {}", target.getName(), failure);
                     throw new CommandException("commands.cloudworks.state_update_failed",
                             new TextComponentTranslation(CloudworksMessages.errorKey(failure)));
                 }

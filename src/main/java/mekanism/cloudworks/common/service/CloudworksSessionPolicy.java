@@ -6,6 +6,7 @@ import mekanism.cloudworks.common.data.ProductionLineData;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
+import mekanism.cloudworks.common.config.CloudworksConfig;
 
 /**
  * Process-local presence; loading a record never grants a running session.
@@ -35,7 +36,7 @@ public final class CloudworksSessionPolicy {
     public boolean canRun(CloudworksData cloud, UUID lineOwner, boolean enabled, boolean offline) {
         UUID owner = cloud.owner();
         return cloud.enabled() && enabled && owner.equals(lineOwner) && joined.contains(owner)
-                && (online.contains(owner) || mekanism.cloudworks.common.config.CloudworksConfig.settings().offlineProcessingEnabled
+                && (online.contains(owner) || CloudworksConfig.settings().offlineProcessingEnabled
                     && cloud.offlineProcessingUnlocked() && offline);
     }
 }

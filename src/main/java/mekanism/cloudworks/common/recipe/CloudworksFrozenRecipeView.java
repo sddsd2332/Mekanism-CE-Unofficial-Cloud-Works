@@ -4,6 +4,12 @@ import mekanism.api.qio.resource.QIOResourceDescriptor;
 import mekanism.cloudworks.common.data.CloudworksResourceStack;
 
 import java.util.*;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
+import mekanism.cloudworks.api.recipe.CloudworksRecipeSpec;
+import mekanism.cloudworks.common.service.CloudworksOutputMultiplier;
+import mekanism.common.recipe.RecipeHandler;
+import net.minecraft.util.ResourceLocation;
 
 /**
  * Detached snapshot for an audited deterministic native adapter.
@@ -22,8 +28,8 @@ public final class CloudworksFrozenRecipeView {
      * version around the caller's freeze work exactly like the native adapter,
      * so a registry mutation mid-capture refuses instead of freezing a mix.
      */
-    static Optional<CloudworksFrozenRecipeView> capture(java.util.function.Supplier<List<Entry>> freezer) {
-        int version = mekanism.common.recipe.RecipeHandler.getGlobalRecipeVersion();
+    static Optional<CloudworksFrozenRecipeView> capture(Supplier<List<Entry>> freezer) {
+        int version = RecipeHandler.getGlobalRecipeVersion();
         List<Entry> captured;
         try {
             captured = freezer.get();
@@ -31,7 +37,7 @@ public final class CloudworksFrozenRecipeView {
             return Optional.empty();
         }
         if (captured == null
-                || version != mekanism.common.recipe.RecipeHandler.getGlobalRecipeVersion())
+                || version != RecipeHandler.getGlobalRecipeVersion())
             return Optional.empty();
         return Optional.of(new CloudworksFrozenRecipeView(version, captured));
     }
@@ -45,9 +51,12 @@ public final class CloudworksFrozenRecipeView {
             key.append(entry.outputTemplate().get(i).write());
             if (!entry.outputPort(i).isEmpty()) key.append('@').append(entry.outputPort(i));
         }
-        for (CloudworksRecipeBatch.ChanceOutput chance : entry.chanceOutputTemplate())
+        for (CloudworksRecipeBatch.ChanceOutput chance : entry.chanceOutputTemplate()) {
             key.append(chance.descriptor()).append(':').append(chance.amount())
-                    .append(':').append(chance.chance()).append(',');
+                    .append(':').append(chance.chance());
+            if (!chance.port().isEmpty()) key.append('@').append(chance.port());
+            key.append(',');
+        }
         for (CloudworksResourceStack choice : entry.choiceOutputTemplate()) key.append("choice:").append(choice.write());
         if (entry.energyPerOperation() != 0D)
             key.append("energy:").append(entry.energyPerOperation()).append(',');
@@ -76,25 +85,26 @@ public final class CloudworksFrozenRecipeView {
     public static final class Entry {
         private final CloudworksRecipeBatch.FrozenView batch;
         private final int fixedDuration;
-        private final Integer requiredDimension;
+        private final String recipeIdentity;
+        private final CloudworksRecipeSpec definition;
 
         Entry(CloudworksRecipeBatch.FrozenView batch, int fixedDuration) {
-            this(batch, fixedDuration, null);
+            this(batch, fixedDuration, "");
         }
 
-        Entry(CloudworksRecipeBatch.FrozenView batch, int fixedDuration, Integer requiredDimension) {
+        Entry(CloudworksRecipeBatch.FrozenView batch, int fixedDuration, String recipeIdentity) {
+            this(batch, fixedDuration, recipeIdentity, null);
+        }
+
+        Entry(CloudworksRecipeBatch.FrozenView batch, int fixedDuration, String recipeIdentity,
+                CloudworksRecipeSpec definition) {
             this.batch = batch;
             this.fixedDuration = fixedDuration;
-            this.requiredDimension = requiredDimension;
+            this.recipeIdentity = Objects.requireNonNull(recipeIdentity);
+            this.definition = definition;
         }
 
-        /**
-         * Dimension gate for ambient recipes whose selection is not resource based;
-         * null means the entry applies in every dimension.
-         */
-        public Integer requiredDimension() {
-            return requiredDimension;
-        }
+        public CloudworksRecipeSpec definition() { return definition; }
 
         public Map<QIOResourceDescriptor, Long> allocate(Map<QIOResourceDescriptor, Long> stock, int operations) {
             return batch.allocate(stock, operations);
@@ -125,7 +135,7 @@ public final class CloudworksFrozenRecipeView {
             return batch.inputAmount(index);
         }
 
-        public java.util.function.Predicate<QIOResourceDescriptor> inputMatcher(int index) {
+        public Predicate<QIOResourceDescriptor> inputMatcher(int index) {
             return batch.inputMatcher(index);
         }
 
@@ -133,11 +143,11 @@ public final class CloudworksFrozenRecipeView {
             return batch.inputPort(index);
         }
 
-        public net.minecraft.util.ResourceLocation inputCodec(int index) { return batch.inputCodec(index); }
-        public net.minecraft.util.ResourceLocation configurationCodec(int index) { return batch.configurationCodec(index); }
+        public ResourceLocation inputCodec(int index) { return batch.inputCodec(index); }
+        public ResourceLocation configurationCodec(int index) { return batch.configurationCodec(index); }
 
         public int configurationCount() { return batch.configurationCount(); }
-        public java.util.function.Predicate<QIOResourceDescriptor> configurationMatcher(int index) {
+        public Predicate<QIOResourceDescriptor> configurationMatcher(int index) {
             return batch.configurationMatcher(index);
         }
         public String configurationPort(int index) { return batch.configurationPort(index); }
@@ -154,6 +164,25 @@ public final class CloudworksFrozenRecipeView {
 
         public String outputPort(int index) {
             return batch.outputPort(index);
+        }
+
+        public String recipeIdentity() {
+            return recipeIdentity;
+        }
+
+        public boolean scalableOutput(int index) { return batch.scalableOutput(index); }
+        public boolean outputMultiplierEnabled() { return batch.outputMultiplierEnabled(); }
+
+        /** Cold-only stable output contract identity, independent of runtime symbol allocation/order. */
+        public long outputSeed() {
+            StringBuilder identity = new StringBuilder(signature(this)).append('|').append(fixedDuration)
+                    .append('|').append(recipeIdentity);
+            for (int index = 0; index < inputCount(); index++)
+                identity.append('|').append(inputAmount(index)).append(':').append(inputCodec(index))
+                        .append(':').append(inputPort(index));
+            for (int index = 0; index < outputTemplate().size(); index++)
+                identity.append('|').append(scalableOutput(index));
+            return CloudworksOutputMultiplier.fingerprint(identity.toString());
         }
 
         /**

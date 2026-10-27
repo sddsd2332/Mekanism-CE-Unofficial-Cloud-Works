@@ -12,6 +12,9 @@ import javax.annotation.Nullable;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.ToLongFunction;
+import mekanism.api.gas.GasStack;
+import mekanism.common.util.StackUtils;
 
 /**
  * Pure buffer/batch transfer math shared by the port tiles. No world access, no
@@ -49,7 +52,7 @@ public final class CloudworksPortIo {
                 if (amounts == null) amounts = new LinkedHashMap<>();
                 amounts.merge(QIOResourceCodecs.fluid(storedFluid), (long) storedFluid.amount, Math::addExact);
             }
-            mekanism.api.gas.GasStack storedGas = tank.getGas();
+            GasStack storedGas = tank.getGas();
             if (storedGas != null && storedGas.amount > 0) {
                 if (amounts == null) amounts = new LinkedHashMap<>();
                 amounts.merge(QIOResourceCodecs.gas(storedGas), (long) storedGas.amount, Math::addExact);
@@ -170,7 +173,7 @@ public final class CloudworksPortIo {
         CloudworksHybridTank tank = tanks.get(index - itemSlots.size());
         FluidStack fluid = tank.getFluid();
         if (fluid != null && fluid.amount > 0) return QIOResourceCodecs.fluid(fluid);
-        mekanism.api.gas.GasStack gas = tank.getGas();
+        GasStack gas = tank.getGas();
         return gas == null || gas.amount <= 0 ? null : QIOResourceCodecs.gas(gas);
     }
 
@@ -178,16 +181,17 @@ public final class CloudworksPortIo {
      * Plans one upload round in buffer order (item slots first, then tanks): every
      * position uploads min(content, remaining per-type room); a zero-progress
      * position is skipped for one grace round and pauses the port on the second
-     * consecutive occurrence — the entire round is then discarded. Slots sharing
-     * one resource type share the room budget.
+     * consecutive occurrence. Any earlier fitting takes stay in the plan and
+     * are committed before the port pauses. Slots sharing one resource type
+     * share the room budget.
      */
     public static UploadPlan planUpload(List<IInventorySlot> itemSlots, List<CloudworksHybridTank> tanks,
-                                 java.util.function.ToLongFunction<QIOResourceDescriptor> roomOf, boolean[] failedLastRound) {
+                                 ToLongFunction<QIOResourceDescriptor> roomOf, boolean[] failedLastRound) {
         return planUpload(itemSlots, tanks, roomOf, failedLastRound, Long.MAX_VALUE);
     }
 
     public static UploadPlan planUpload(List<IInventorySlot> itemSlots, List<CloudworksHybridTank> tanks,
-            java.util.function.ToLongFunction<QIOResourceDescriptor> roomOf, boolean[] failedLastRound, long totalRoom) {
+            ToLongFunction<QIOResourceDescriptor> roomOf, boolean[] failedLastRound, long totalRoom) {
         if (totalRoom < 0) throw new IllegalArgumentException("Negative upload room");
         int bufferSize = itemSlots.size() + tanks.size();
         Map<QIOResourceDescriptor, Long> remainingRoom = new LinkedHashMap<>();
@@ -211,8 +215,9 @@ public final class CloudworksPortIo {
             long take = Math.min(content, Math.min(room, totalRoom));
             if (take == 0) {
                 if (failedLastRound[index]) {
-                    // Second consecutive zero-progress round: pause and discard the round.
-                    return new UploadPlan(bufferSize, index);
+                    // Keep earlier positions' fitting transfers; pause after this partial round commits.
+                    plan.pauseIndex = index;
+                    return plan;
                 }
                 failedLastRound[index] = true;
                 continue;
@@ -238,7 +243,7 @@ public final class CloudworksPortIo {
                 ItemStack stored = slot.getStack();
                 long left = stored.getCount() - takes[index];
                 if (left <= 0) slot.setEmpty();
-                else slot.setStack(mekanism.common.util.StackUtils.size(stored, (int) left));
+                else slot.setStack(StackUtils.size(stored, (int) left));
             } else {
                 CloudworksHybridTank tank = tanks.get(index - itemSlots.size());
                 FluidStack fluid = tank.getFluid();
@@ -279,9 +284,9 @@ public final class CloudworksPortIo {
             if (tank.getFluid() == null) tank.setFluid(new FluidStack(template, (int) amount));
             else tank.growFluid((int) amount);
         } else if (QIOResourceCodecs.GAS_FAMILY.equals(family)) {
-            mekanism.api.gas.GasStack template = descriptor.resolveGasStackTemplate();
+            GasStack template = descriptor.resolveGasStackTemplate();
             if (template == null) return;
-            if (tank.getGas() == null) tank.setGas(new mekanism.api.gas.GasStack(template.getGas(), (int) amount));
+            if (tank.getGas() == null) tank.setGas(new GasStack(template.getGas(), (int) amount));
             else tank.growGas((int) amount);
         }
     }
@@ -361,9 +366,9 @@ public final class CloudworksPortIo {
             return;
         }
         if (QIOResourceCodecs.GAS_FAMILY.equals(family)) {
-            mekanism.api.gas.GasStack template = descriptor.resolveGasStackTemplate();
+            GasStack template = descriptor.resolveGasStackTemplate();
             if (template == null) return;
-            if (tank.getGas() == null) tank.setGas(new mekanism.api.gas.GasStack(template.getGas(), (int) amount));
+            if (tank.getGas() == null) tank.setGas(new GasStack(template.getGas(), (int) amount));
             else tank.growGas((int) amount);
             return;
         }
@@ -371,7 +376,7 @@ public final class CloudworksPortIo {
 
     /**
      * One planned upload round: per-slot takes plus, when a slot fails twice in a
-     * row, the pause trigger (the whole round is then discarded — nothing uploads).
+     * row, the pause trigger. Takes planned before the trigger remain committed.
      */
     public static final class UploadPlan {
         public final Map<QIOResourceDescriptor, Long> fitting = new LinkedHashMap<>();
@@ -380,7 +385,7 @@ public final class CloudworksPortIo {
         /**
          * -1, or the buffer index whose second consecutive zero-progress round pauses the port.
          */
-        public final int pauseIndex;
+        public int pauseIndex;
 
         UploadPlan(int bufferSize, int pauseIndex) {
             this.takes = new long[bufferSize];

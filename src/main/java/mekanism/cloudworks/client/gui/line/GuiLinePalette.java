@@ -8,14 +8,20 @@ import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.gui.ScaledResolution;
 import org.lwjgl.opengl.GL11;
 
-/** Keeps the fixed-size node palette usable below its natural height. */
+/** Keeps window content usable below its natural height. */
 public final class GuiLinePalette extends GuiElement {
-    public static final int CONTENT_HEIGHT = 216;
+    public static final int CONTENT_HEIGHT = 192;
     private final List<GuiElement> content = new ArrayList<>();
+    private final int contentHeight;
     private int scroll;
 
     public GuiLinePalette(IGuiWrapper gui, int x, int y, int height) {
-        super(gui, x, y, 108, Math.max(1, height));
+        this(gui, x, y, 108, height, CONTENT_HEIGHT);
+    }
+
+    public GuiLinePalette(IGuiWrapper gui, int x, int y, int width, int height, int contentHeight) {
+        super(gui, x, y, width, Math.max(1, height));
+        this.contentHeight = contentHeight;
     }
 
     public <T extends GuiElement> T control(T element) {
@@ -44,14 +50,39 @@ public final class GuiLinePalette extends GuiElement {
     }
 
     public boolean canScroll(int direction) {
-        return direction < 0 ? scroll > 0 : scroll < Math.max(0, CONTENT_HEIGHT - height);
+        return direction < 0 ? scroll > 0 : scroll < Math.max(0, contentHeight - height);
+    }
+
+    public int scrollOffset() {
+        return scroll;
+    }
+
+    public void viewportHeight(int height) {
+        this.height = Math.max(1, height);
+        setScroll(scroll);
+    }
+
+    public void resetScroll() {
+        int movement = scroll;
+        scroll = 0;
+        content.forEach(element -> element.move(0, movement));
     }
 
     public void scroll(int direction) {
-        int next = Math.max(0, Math.min(Math.max(0, CONTENT_HEIGHT - height), scroll + direction * 18));
+        setScroll(scroll + direction * 18);
+    }
+
+    private void setScroll(int position) {
+        int next = Math.max(0, Math.min(Math.max(0, contentHeight - height), position));
         int movement = scroll - next;
         scroll = next;
         content.forEach(element -> element.move(0, movement));
+    }
+
+    @Override
+    public boolean isMouseOver(double mouseX, double mouseY) {
+        return visible && mouseX >= getX() && mouseX < getX() + width
+                && mouseY >= getY() && mouseY < getY() + height;
     }
 
     @Override

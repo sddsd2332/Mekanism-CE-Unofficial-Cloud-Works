@@ -122,33 +122,6 @@ public final class CloudworksEnergyBalancer {
         return result;
     }
 
-    /** Credits actual fuel generation without charging a second work tick. */
-    public static Settlement creditGeneration(double cloudEnergy, double cloudCapacity, boolean unlimited,
-                                               double[] pools, double[] capacities, boolean[] generationTargets,
-                                               double[] loads, double generated) {
-        // Reuse the normal validation of pools/capacities and numerical limits.
-        calculate(cloudEnergy, cloudCapacity, unlimited, pools, capacities,
-                new double[pools.length], new double[pools.length]);
-        generated = finiteNonnegative(generated);
-        if (loads.length != pools.length || generationTargets.length != pools.length)
-            throw new IllegalArgumentException("energy vectors must have equal lengths");
-        double[] room = new double[pools.length], result = pools.clone();
-        for (int i = 0; i < room.length; i++)
-            if (finiteNonnegative(loads[i]) > EPSILON || generationTargets[i])
-                room[i] = capacities[i] - pools[i];
-        double[] accepted = fairAllocation(room, generated);
-        double used = 0D;
-        for (int i = 0; i < accepted.length; i++) {
-            result[i] += accepted[i];
-            used = addFinite(used, accepted[i]);
-        }
-        double nextCloud = unlimited ? 0D : cloudEnergy
-                + Math.min(cloudCapacity - cloudEnergy, Math.max(0D, generated - used));
-        boolean[] powered = new boolean[pools.length];
-        java.util.Arrays.fill(powered, true);
-        return new Settlement(powered, result, nextCloud, 0D, generated);
-    }
-
     /**
      * Equal-share allocator capped by each demand; returns one allocation per entry.
      */
@@ -225,7 +198,7 @@ public final class CloudworksEnergyBalancer {
         }
 
         public List<Boolean> powered() {
-            return Collections.unmodifiableList(new java.util.AbstractList<Boolean>() {
+            return Collections.unmodifiableList(new AbstractList<Boolean>() {
                 @Override public Boolean get(int index) { return powered[index]; }
                 @Override public int size() { return powered.length; }
             });

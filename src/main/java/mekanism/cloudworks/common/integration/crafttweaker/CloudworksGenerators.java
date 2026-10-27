@@ -3,8 +3,8 @@ package mekanism.cloudworks.common.integration.crafttweaker;
 import crafttweaker.annotations.ZenRegister;
 import crafttweaker.api.item.IItemStack;
 import mekanism.cloudworks.common.integration.CloudworksScriptMachines;
-import mekanism.cloudworks.common.recipe.CloudworksContractRecipeAdapter;
-import mekanism.cloudworks.common.recipe.CloudworksRecipeBatch;
+import mekanism.cloudworks.api.recipe.CloudworksRecipeSpec;
+import mekanism.cloudworks.api.recipe.CloudworksResourceMatcher;
 import net.minecraft.item.ItemStack;
 import stanhebben.zenscript.annotations.ZenClass;
 import stanhebben.zenscript.annotations.ZenMethod;
@@ -29,10 +29,14 @@ public final class CloudworksGenerators {
         ItemStack machine = CloudworksMachines.stack(item);
         if (inputs == null || inputs.length == 0 || outputs == null)
             throw new IllegalArgumentException("Fuel generation requires inputs and an output array");
-        CloudworksRecipeBatch batch = new CloudworksRecipeBatch().energy(joulesPerOperation);
-        for (CloudworksResources input : inputs) batch.resources(input.alternatives, input.amount, "");
-        for (CloudworksResources output : outputs) batch.output(output.single(), output.amount, "");
-        CloudworksContractRecipeAdapter.Contract recipe = new CloudworksContractRecipeAdapter.Contract(id, batch, 1);
+        if (!Double.isFinite(joulesPerOperation) || joulesPerOperation <= 0D)
+            throw new IllegalArgumentException("Fuel generation requires positive finite energy");
+        CloudworksRecipeSpec.Builder builder = CloudworksRecipeSpec.builder(id).duration(1)
+                .energyPerOperation(joulesPerOperation);
+        for (CloudworksResources input : inputs)
+            builder.matcher(CloudworksResourceMatcher.alternatives(input.alternatives), input.amount, "");
+        for (CloudworksResources output : outputs) builder.output(output.single(), output.amount, "");
+        CloudworksRecipeSpec recipe = builder.build();
         CloudworksScriptAction.submit("Cloudworks fuel " + id + " on " + machine, () ->
                 CloudworksScriptMachines.recipe(machine, recipe));
     }

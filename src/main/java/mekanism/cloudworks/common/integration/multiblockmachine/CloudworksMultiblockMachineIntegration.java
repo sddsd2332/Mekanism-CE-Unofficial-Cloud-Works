@@ -2,17 +2,21 @@ package mekanism.cloudworks.common.integration.multiblockmachine;
 
 import java.util.Collections;
 import mekanism.api.qio.resource.QIOResourceCodecs;
-import mekanism.cloudworks.api.CloudworksMachineAdapter;
+import mekanism.cloudworks.api.*;
+import mekanism.cloudworks.api.card.*;
+import mekanism.cloudworks.api.environment.*;
+import mekanism.cloudworks.api.machine.*;
+import mekanism.cloudworks.api.module.*;
+import mekanism.cloudworks.api.node.*;
+import mekanism.cloudworks.api.recipe.*;
+import mekanism.cloudworks.api.transfer.*;
+import mekanism.cloudworks.api.work.*;
 import mekanism.cloudworks.common.recipe.CloudworksChemicalPairRecipeAdapter;
 import mekanism.cloudworks.common.recipe.CloudworksGasFluidRecipeAdapter;
 import mekanism.cloudworks.common.recipe.CloudworksGasGeneratorAdapter;
 import mekanism.cloudworks.common.recipe.CloudworksWindGeneratorAdapter;
 import mekanism.cloudworks.common.recipe.CloudworksSeparatorRecipeAdapter;
 import mekanism.cloudworks.common.recipe.CloudworksSolarNeutronRecipeAdapter;
-import mekanism.cloudworks.common.registry.CloudworksMachineAdapters;
-import mekanism.cloudworks.common.registry.CloudworksRegistries;
-import mekanism.cloudworks.common.registry.MachineExecutionProfile;
-import mekanism.cloudworks.common.slot.MachineSlotLayout;
 import mekanism.common.block.states.BlockStateMachine.MachineType;
 import mekanism.common.config.GeneratorsConfig;
 import mekanism.common.config.MekanismConfig;
@@ -32,6 +36,7 @@ public final class CloudworksMultiblockMachineIntegration {
 
     public static synchronized void register(boolean generatorsLoaded) {
         if (registered) return;
+        CloudworksAPI.registerMachineModule(CloudworksThreadModule.type());
         MultiblockMachineConfig config = MekanismConfig.current().multiblock;
         if (config == null) throw new IllegalStateException("MultiblockMachine configuration is not loaded");
         int infuserProcesses = config.LargeChemicalInfuserProcesses.val();
@@ -60,7 +65,8 @@ public final class CloudworksMultiblockMachineIntegration {
                         .add("gas_output_right", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, GAS_CAPACITY),
                 new CloudworksSeparatorRecipeAdapter(RecipeHandler.Recipe.ELECTROLYTIC_SEPARATOR.get(), true));
         register(new ItemStack(MultiblockMachineBlocks.LargeSolarNeutronActivator),
-                new MachineExecutionProfile(config.LargeSolarNeutronProcesses.val(), 0, 0, 1),
+                new MachineExecutionProfile(config.LargeSolarNeutronProcesses.val(), 0, 0, 1,
+                        MachineUpgradePolicy.MEKANISM_SPEED),
                 new MachineSlotLayout()
                         .add("gas_input", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.INPUT, GAS_CAPACITY)
                         .add("gas_output", QIOResourceCodecs.GAS_STACK_ID, MachineSlotLayout.PortRole.OUTPUT, GAS_CAPACITY),
@@ -75,8 +81,9 @@ public final class CloudworksMultiblockMachineIntegration {
 
     private static void register(ItemStack machine, MachineExecutionProfile profile,
             MachineSlotLayout layout, CloudworksMachineAdapter adapter) {
-        CloudworksRegistries.registerMachine(machine, profile, layout, Collections.emptyList());
-        CloudworksMachineAdapters.register(CloudworksRegistries.identityKey(machine), adapter);
+        CloudworksAPI.registerMachine(machine, profile, layout, adapter, MachineIdentityPolicy.none());
+        CloudworksAPI.acceptMachineUpgrade(machine, CloudworksThreadModule.type(),
+                mekanism.multiblockmachine.common.MultiblockMachineUpgrades.THREAD.getMaxInstalled());
     }
 
     static void registerGenerators(MultiblockMachineConfig config) {
@@ -84,22 +91,25 @@ public final class CloudworksMultiblockMachineIntegration {
         if (generators == null) throw new IllegalStateException("Generators configuration is not loaded");
         ItemStack wind = new ItemStack(MultiblockMachineBlocks.LargeWindGenerator);
         int windProcesses = config.LargeWindGeneratorProcesses.val();
-        CloudworksRegistries.registerMachine(wind,
-                new MachineExecutionProfile(windProcesses, 0, generators.windGeneratorStorage.val() * windProcesses, 1),
-                new MachineSlotLayout(), Collections.emptyList());
-        CloudworksRegistries.registerEnergyGenerator(wind, new CloudworksWindGeneratorAdapter(
+        CloudworksAPI.registerMachine(new CloudworksMachineDefinition(wind,
+                new MachineExecutionProfile(windProcesses, 0, generators.windGeneratorStorage.val() * windProcesses, 1,
+                        MachineUpgradePolicy.NONE),
+                new MachineSlotLayout(), MachineIdentityPolicy.none(), Collections.emptyList(), new CloudworksWindGeneratorAdapter(
                 config.LargeWindGenerationMin.val(), config.LargeWindGenerationMax.val(),
-                config.LargeWindGenerationMinY.val(), config.LargeWindGenerationMaxY.val(), 46));
+                config.LargeWindGenerationMinY.val(), config.LargeWindGenerationMaxY.val(), 46), null));
+        CloudworksAPI.acceptMachineUpgrade(wind, MachineModuleType.height(),
+                (int) Math.max(0L, Math.min(256L, (long) config.LargeWindGenerationMaxY.val() - 46)));
+        CloudworksAPI.acceptMachineUpgrade(wind, CloudworksThreadModule.type(),
+                mekanism.multiblockmachine.common.MultiblockMachineUpgrades.THREAD.getMaxInstalled());
         ItemStack gas = new ItemStack(MultiblockMachineBlocks.LargeGasGenerator);
         int gasProcesses = config.LargeGasGeneratorProcesses.val();
-        CloudworksRegistries.registerMachine(gas,
+        CloudworksAPI.registerMachine(gas,
                 new MachineExecutionProfile(gasProcesses, 0,
-                        MekanismConfig.current().general.FROM_H2.val() * 1000 * gasProcesses, 1),
+                        MekanismConfig.current().general.FROM_H2.val() * 1000 * gasProcesses, 1, MachineUpgradePolicy.NONE),
                 new MachineSlotLayout().add("gas_input", QIOResourceCodecs.GAS_STACK_ID,
-                        MachineSlotLayout.PortRole.INPUT, GAS_CAPACITY), Collections.emptyList());
-        CloudworksGasGeneratorAdapter fuel = new CloudworksGasGeneratorAdapter(
-                RecipeHandler.Recipe.GAS_FUEL_TO_ENERGY_RECIPE.get());
-        CloudworksRegistries.registerSpecial(gas, fuel);
-        CloudworksRegistries.registerEnergyGenerator(gas, fuel);
+                        MachineSlotLayout.PortRole.INPUT, GAS_CAPACITY), new CloudworksGasGeneratorAdapter(
+                RecipeHandler.Recipe.GAS_FUEL_TO_ENERGY_RECIPE.get()), MachineIdentityPolicy.none());
+        CloudworksAPI.acceptMachineUpgrade(gas, CloudworksThreadModule.type(),
+                mekanism.multiblockmachine.common.MultiblockMachineUpgrades.THREAD.getMaxInstalled());
     }
 }

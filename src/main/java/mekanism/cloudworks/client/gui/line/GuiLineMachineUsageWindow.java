@@ -5,6 +5,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import mekanism.client.gui.IGuiWrapper;
 import mekanism.client.gui.element.scroll.GuiTextScrollList;
@@ -21,9 +22,11 @@ import net.minecraft.util.text.TextComponentString;
 
 public final class GuiLineMachineUsageWindow extends GuiLineWindow {
     private final Supplier<CloudworksLineDraft> configuration;
+    private final LongSupplier configurationVersion;
     private final Consumer<UUID> focus;
     private final GuiTextScrollList locations;
     private CloudworksLineDraft snapshot;
+    private long snapshotVersion = Long.MIN_VALUE;
     private List<Type> types = Collections.emptyList();
     private MachineKey selectedType;
     private UUID lastNode;
@@ -31,8 +34,14 @@ public final class GuiLineMachineUsageWindow extends GuiLineWindow {
 
     public GuiLineMachineUsageWindow(IGuiWrapper gui, Supplier<CloudworksLineDraft> configuration,
             Consumer<UUID> focus) {
+        this(gui, configuration, () -> 0L, focus);
+    }
+
+    public GuiLineMachineUsageWindow(IGuiWrapper gui, Supplier<CloudworksLineDraft> configuration,
+            LongSupplier configurationVersion, Consumer<UUID> focus) {
         super(gui, (gui.getWidth() - 227) / 2, 30, 227, 151, "machine_usage", CloudworksWindowTypes.LINE_MACHINE_USAGE);
         this.configuration = configuration;
+        this.configurationVersion = configurationVersion;
         this.focus = focus;
         addChild(new GuiCloudSlotScroll(gui, relativeX + 8, relativeY + 26, 5, 6,
                 this::slots, this::selectType, this::selectedIndex, this::typeTooltip));
@@ -47,8 +56,10 @@ public final class GuiLineMachineUsageWindow extends GuiLineWindow {
 
     private void refresh() {
         CloudworksLineDraft current = configuration.get();
-        if (snapshot == current) return;
+        long version = configurationVersion.getAsLong();
+        if (snapshot == current && snapshotVersion == version) return;
         snapshot = current;
+        snapshotVersion = version;
         types = CloudworksLineMachineUsage.collect(current);
         if (selectedIndex() < 0) {
             selectedType = null;
@@ -107,7 +118,6 @@ public final class GuiLineMachineUsageWindow extends GuiLineWindow {
         if (id.equals(lastNode) && now - lastClick < 350) {
             focus.accept(id);
             lastNode = null;
-            close();
         } else lastNode = id;
         lastClick = now;
     }

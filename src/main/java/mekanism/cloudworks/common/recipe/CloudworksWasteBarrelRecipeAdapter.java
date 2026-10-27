@@ -1,8 +1,7 @@
 package mekanism.cloudworks.common.recipe;
 
-import java.util.AbstractMap;
-import java.util.LinkedHashSet;
-import java.util.Set;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import mekanism.api.gas.Gas;
 import mekanism.api.gas.GasRegistry;
 import mekanism.api.gas.GasStack;
@@ -13,15 +12,12 @@ public final class CloudworksWasteBarrelRecipeAdapter extends CloudworksNativeRe
     private final int multiplier;
 
     public CloudworksWasteBarrelRecipeAdapter(int multiplier) {
-        super(new AbstractMap<Gas, Gas>() {
-            @Override
-            public Set<Entry<Gas, Gas>> entrySet() {
-                Set<Entry<Gas, Gas>> entries = new LinkedHashSet<>();
+        super(CloudworksLiveMaps.live(() -> {
+                Map<Gas, Gas> entries = new LinkedHashMap<>();
                 for (Gas gas : GasRegistry.getRegisteredGasses())
-                    if (gas.isRadiation()) entries.add(new SimpleImmutableEntry<>(gas, gas));
+                    if (gas.isRadiation()) entries.put(gas, gas);
                 return entries;
-            }
-        });
+            }));
         if (multiplier <= 0) throw new IllegalArgumentException("Invalid decay multiplier");
         this.multiplier = multiplier;
     }

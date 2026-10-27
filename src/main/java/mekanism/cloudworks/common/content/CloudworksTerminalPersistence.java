@@ -30,15 +30,23 @@ import net.minecraft.world.World;
 import net.minecraft.world.storage.ISaveHandler;
 import net.minecraft.world.chunk.storage.RegionFileCache;
 import net.minecraft.world.storage.ThreadedFileIOBase;
+import java.util.Collections;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.LogManager;
 
 /** Physical terminal durability fences. Workers receive only detached NBT and file coordinates. */
 public final class CloudworksTerminalPersistence {
-    private static final org.apache.logging.log4j.Logger LOGGER =
-            org.apache.logging.log4j.LogManager.getLogger("Cloudworks-Terminal-Persistence");
+    private static final Logger LOGGER =
+            LogManager.getLogger("Cloudworks-Terminal-Persistence");
     private static ExecutorService confirmations = newExecutor();
     private static ExecutorService playerSaves;
     private static final Map<UUID, ArrayDeque<PlayerWrite>> playerWrites = new LinkedHashMap<>();
-    private static final java.util.Set<UUID> loggedOutPlayers = new java.util.HashSet<>();
+    private static final Set<UUID> loggedOutPlayers = new HashSet<>();
     private static final long LOGOUT_WAIT_MILLIS = 200;
     private static final int PLAYER_PUBLICATIONS_PER_TICK = 16;
     private static int publicationCursor;
@@ -64,7 +72,7 @@ public final class CloudworksTerminalPersistence {
     private static synchronized ExecutorService playerExecutor() {
         if (shuttingDown) throw new IllegalStateException("Cloudworks player saves are stopping");
         if (playerSaves == null || playerSaves.isShutdown()) {
-            java.util.concurrent.atomic.AtomicInteger ids = new java.util.concurrent.atomic.AtomicInteger();
+            AtomicInteger ids = new AtomicInteger();
             playerSaves = Executors.newFixedThreadPool(2, task -> {
                 Thread thread = new Thread(task, "Cloudworks-Player-Save-" + ids.incrementAndGet());
                 thread.setDaemon(true);
@@ -95,7 +103,7 @@ public final class CloudworksTerminalPersistence {
         for (ExecutorService service : new ExecutorService[]{closing, closingPlayers}) {
             if (service == null) continue;
             while (!service.isTerminated()) {
-                try { service.awaitTermination(1, java.util.concurrent.TimeUnit.SECONDS); }
+                try { service.awaitTermination(1, TimeUnit.SECONDS); }
                 catch (InterruptedException interruption) { interrupted = true; }
             }
         }
@@ -114,7 +122,7 @@ public final class CloudworksTerminalPersistence {
     }
 
     /** Captures player NBT on the server thread and writes it on the durability worker. */
-    static java.util.concurrent.CompletableFuture<Void> savePlayer(EntityPlayerMP player) {
+    static CompletableFuture<Void> savePlayer(EntityPlayerMP player) {
         if (player == null) return failedPlayerSave("Missing player", null);
         if (loggedOutPlayers.contains(player.getUniqueID())) return revokedSave();
         MinecraftServer server = player.getServer();
@@ -146,7 +154,7 @@ public final class CloudworksTerminalPersistence {
         return directory;
     }
 
-    static CompletableFuture<Void> savePlayerSnapshot(java.util.UUID owner, File directory,
+    static CompletableFuture<Void> savePlayerSnapshot(UUID owner, File directory,
             String playerId, NBTTagCompound snapshot) {
         if (loggedOutPlayers.contains(owner)) return revokedSave();
         if (directory == null || !directory.isAbsolute())
@@ -325,12 +333,12 @@ public final class CloudworksTerminalPersistence {
      * Its writer catches IO failures, so merely waiting for the queue would be insufficient.
      */
     public static CompletableFuture<Void> confirmChunk(File directory, int chunkX, int chunkZ, NBTTagCompound tile) {
-        return confirmChunk(directory, chunkX, chunkZ, java.util.Collections.singletonList(tile));
+        return confirmChunk(directory, chunkX, chunkZ, Collections.singletonList(tile));
     }
 
     public static CompletableFuture<Void> confirmChunk(File directory, int chunkX, int chunkZ,
-            java.util.List<NBTTagCompound> expectedTiles) {
-        java.util.List<NBTTagCompound> expected = new java.util.ArrayList<>();
+            List<NBTTagCompound> expectedTiles) {
+        List<NBTTagCompound> expected = new ArrayList<>();
         for (NBTTagCompound tile : expectedTiles) expected.add(tile.copy());
         return CompletableFuture.runAsync(() -> {
             try {
@@ -339,7 +347,7 @@ public final class CloudworksTerminalPersistence {
                     if (stream == null) throw new IOException("Missing terminal chunk");
                     NBTTagList tiles = CompressedStreamTools.read(stream)
                             .getCompoundTag("Level").getTagList("TileEntities", 10);
-                    java.util.Map<String, NBTTagCompound> byPosition = new java.util.HashMap<>();
+                    Map<String, NBTTagCompound> byPosition = new HashMap<>();
                     for (int i = 0; i < tiles.tagCount(); i++) {
                         NBTTagCompound actual = tiles.getCompoundTagAt(i);
                         byPosition.put(position(actual), actual);

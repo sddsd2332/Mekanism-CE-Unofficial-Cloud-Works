@@ -1,0 +1,1 @@
+{  "parent": "cloudworks:item/standard_item",  "textures": {    "layer0": "mekanism:items/speedupgrade"  }}

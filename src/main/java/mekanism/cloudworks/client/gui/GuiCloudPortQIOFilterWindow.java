@@ -38,7 +38,7 @@ public final class GuiCloudPortQIOFilterWindow extends GuiWindow {
         this.container = container;
         interactionStrategy = InteractionStrategy.ALL;
         addChild(new GuiLineResourceGrid(gui, relativeX + 8, relativeY + 23, 9, 4,
-                () -> entries, resource -> selected = resource,
+                () -> entries, () -> selected, resource -> selected = resource,
                 resource -> request(Operation.REMOVE_FILTER, resource, 0),
                 resource -> request(Operation.ADD_FILTER, resource, 0)));
         addChild(new MekanismButton(gui, relativeX + 8, relativeY + 101, 90, 18,

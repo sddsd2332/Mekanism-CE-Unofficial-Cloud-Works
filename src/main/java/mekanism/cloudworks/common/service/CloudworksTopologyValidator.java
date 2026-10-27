@@ -1,12 +1,20 @@
 package mekanism.cloudworks.common.service;
 
 import mekanism.cloudworks.common.data.CloudworksChannelNode;
+import mekanism.cloudworks.common.data.CloudworksAuxiliaryNodeData;
 import mekanism.cloudworks.common.data.MachineNodeData;
 import mekanism.cloudworks.common.data.ProductionLineData;
 import mekanism.cloudworks.common.data.ProductionLineLink;
-import mekanism.cloudworks.common.slot.MachineSlotLayout;
+import mekanism.cloudworks.api.node.CloudworksPortDefinition;
+import mekanism.cloudworks.api.machine.MachineSlotLayout;
+import mekanism.cloudworks.api.node.CloudworksAuxiliaryNodeType;
+import mekanism.cloudworks.common.registry.CloudworksAuxiliaryNodeRegistry;
 
 import java.util.*;
+import mekanism.api.qio.resource.QIOResourceCodecRegistry;
+import mekanism.cloudworks.api.machine.CloudworksThermalPlan;
+import mekanism.cloudworks.common.special.CloudworksSpecialNodeArchetype;
+import mekanism.cloudworks.common.special.CloudworksSpecialNodeArchetypes;
 
 public final class CloudworksTopologyValidator {
     private CloudworksTopologyValidator() {
@@ -28,8 +36,8 @@ public final class CloudworksTopologyValidator {
             if (graph.putIfAbsent(channel.id(), new HashSet<>()) != null)
                 return Result.invalid(machineIds.contains(channel.id())
                         ? "channel id collides with a machine node id" : "duplicate channel id");
-            if (channel.mode() == CloudworksChannelNode.Mode.RECEIVE_INPUT) receiving++;
-            if (channel.mode() == CloudworksChannelNode.Mode.SEND_OUTPUT) sending++;
+            if (channel.archetypeId().isEmpty() && channel.mode() == CloudworksChannelNode.Mode.RECEIVE_INPUT) receiving++;
+            if (channel.archetypeId().isEmpty() && channel.mode() == CloudworksChannelNode.Mode.SEND_OUTPUT) sending++;
             if (channel.mode().input()) {
                 long declared = 0;
                 try {
@@ -40,10 +48,30 @@ public final class CloudworksTopologyValidator {
                 if (declared > channel.buffer().capacity()) return Result.invalid("channel manifest exceeds buffer");
             }
         }
+        for (CloudworksAuxiliaryNodeData auxiliary : line.auxiliaries()) {
+            if (graph.putIfAbsent(auxiliary.nodeId(), new HashSet<>()) != null)
+                return Result.invalid("duplicate auxiliary node id");
+            if (CloudworksAuxiliaryNodeRegistry.byItem(auxiliary.type()) == null)
+                return Result.invalid("unknown auxiliary node type");
+            if (auxiliary.input().total() > auxiliary.input().capacity())
+                return Result.invalid("auxiliary input exceeds capacity");
+            for (UUID target : auxiliary.linkedTargets())
+                if (!machineIds.contains(target))
+                    return Result.invalid("auxiliary target is not a machine");
+        }
         if (receiving > 1) return Result.invalid("line has multiple cloud input channels");
         if (sending > 1) return Result.invalid("line has multiple cloud output channels");
+        boolean forbiddenTransferLink = false;
         for (ProductionLineLink link : line.links()) {
             if (!linkIds.add(link.linkId())) return Result.invalid("duplicate link id");
+            CloudworksChannelNode sourceChannel = channel(line, link.sourceNode());
+            CloudworksChannelNode targetChannel = channel(line, link.targetNode());
+            CloudworksAuxiliaryNodeData sourceAuxiliary = auxiliary(line, link.sourceNode());
+            CloudworksAuxiliaryNodeData targetAuxiliary = auxiliary(line, link.targetNode());
+            if (!CloudworksChannelNode.Mode.allowsDirectLink(
+                    sourceChannel == null || sourceChannel.special() ? null : sourceChannel.mode(),
+                    targetChannel == null || targetChannel.special() ? null : targetChannel.mode()))
+                forbiddenTransferLink = true;
             if (!link.enabled()) continue;
             if (link.resourceFilters().stream().anyMatch(filter -> !filter.isResolved()))
                 return Result.invalid("unresolved link filter");
@@ -55,9 +83,7 @@ public final class CloudworksTopologyValidator {
             if (!graph.containsKey(link.sourceNode()) || !graph.containsKey(link.targetNode())) {
                 return Result.invalid("link references an unknown node");
             }
-            CloudworksChannelNode sourceChannel = channel(line, link.sourceNode());
-            CloudworksChannelNode targetChannel = channel(line, link.targetNode());
-            if (sourceChannel != null || targetChannel != null) {
+            if (sourceChannel != null || targetChannel != null || sourceAuxiliary != null || targetAuxiliary != null) {
                 if (!validChannelLink(line, link, sourceChannel, targetChannel))
                     return Result.invalid("channel link roles or codecs are incompatible");
                 graph.get(link.sourceNode()).add(link.targetNode());
@@ -65,6 +91,12 @@ public final class CloudworksTopologyValidator {
             }
             MachineNodeData source = find(line, link.sourceNode());
             MachineNodeData target = find(line, link.targetNode());
+            // B5: links touching a frozen node stay persisted and pass structural
+            // checks; new or edited ones are refused by the edit guard instead.
+            if (source != null && source.frozenByMissingMod() || target != null && target.frozenByMissingMod()) {
+                graph.get(link.sourceNode()).add(link.targetNode());
+                continue;
+            }
             MachineSlotLayout sourceLayout = source.capabilities().slots();
             MachineSlotLayout targetLayout = target.capabilities().slots();
             if (sourceLayout == null || targetLayout == null)
@@ -78,8 +110,8 @@ public final class CloudworksTopologyValidator {
                 return Result.invalid("link resource codecs are incompatible");
             if (!Double.isFinite(link.ratio()) || link.ratio() < 0D || link.ratio() > 1D)
                 return Result.invalid("link ratio is invalid");
-            if (sourceSlot.codecId().equals(mekanism.cloudworks.api.CloudworksThermalPlan.HEAT)) {
-                if (source.capabilities().thermal() == null || target.capabilities().thermal() == null
+            if (sourceSlot.codecId().equals(CloudworksThermalPlan.HEAT)) {
+                if (source.capabilities().thermalPortPlan() == null || target.capabilities().thermalPortPlan() == null
                         || !link.resourceFilters().isEmpty() || source.nodeId().equals(target.nodeId())
                         || !link.sourcePort().equals("heat_output") || !link.targetPort().equals("heat_input"))
                     return Result.invalid("invalid thermal connection");
@@ -94,6 +126,7 @@ public final class CloudworksTopologyValidator {
         for (UUID node : graph.keySet()) {
             if (cycle(node, graph, visiting, visited)) return Result.invalid("production line contains a cycle");
         }
+        if (forbiddenTransferLink) return Result.invalid("transfer input and transfer output cannot be linked directly");
         return Result.validResult();
     }
 
@@ -107,33 +140,59 @@ public final class CloudworksTopologyValidator {
         return null;
     }
 
+    private static CloudworksAuxiliaryNodeData auxiliary(ProductionLineData line, UUID id) {
+        for (CloudworksAuxiliaryNodeData value : line.auxiliaries())
+            if (value.nodeId().equals(id)) return value;
+        return null;
+    }
+
     private static boolean validChannelLink(ProductionLineData line, ProductionLineLink link,
                                             CloudworksChannelNode source, CloudworksChannelNode target) {
-        if (source != null && target != null) {
-            if (link.ratio() != 1D || source.mode().input() != target.mode().input()
-                    || source.mode().input() && (source.mode() != CloudworksChannelNode.Mode.RECEIVE_INPUT
-                    || target.mode() != CloudworksChannelNode.Mode.TRANSFER_INPUT)
-                    || !source.mode().input() && (source.mode() != CloudworksChannelNode.Mode.TRANSFER_OUTPUT
-                    || target.mode() != CloudworksChannelNode.Mode.SEND_OUTPUT)
-                    || !link.sourcePort().equals(link.targetPort())
-                    || !mekanism.api.qio.resource.QIOResourceCodecRegistry.INSTANCE.isRegistered(
-                    new net.minecraft.util.ResourceLocation(link.sourcePort())))
-                return false;
-            return link.resourceFilters().stream()
-                    .allMatch(filter -> filter.getCodecId().toString().equals(link.sourcePort()));
-        }
-        boolean input = source != null;
-        CloudworksChannelNode boundary = input ? source : target;
-        if (boundary.mode().input() != input || link.ratio() != 1D) return false;
-        MachineNodeData machine = find(line, input ? link.targetNode() : link.sourceNode());
-        MachineSlotLayout layout = machine == null ? null : machine.capabilities().slots();
-        MachineSlotLayout.Slot slot = layout == null ? null : layout.find(input ? link.targetPort() : link.sourcePort());
-        if (slot == null || input && !slot.role().isInput() || !input && slot.role() != MachineSlotLayout.PortRole.OUTPUT)
+        CloudworksPortDefinition sourcePort = port(line, link.sourceNode(), link.sourcePort(), source);
+        CloudworksPortDefinition targetPort = port(line, link.targetNode(), link.targetPort(), target);
+        if (sourcePort == null || targetPort == null || !sourcePort.canOutput() || !targetPort.canInput()
+                || !sourcePort.codec().equals(targetPort.codec())
+                || !QIOResourceCodecRegistry.INSTANCE.isRegistered(sourcePort.codec())
+                || link.resourceFilters().stream().anyMatch(filter -> !sourcePort.codec().equals(filter.getCodecId())))
             return false;
-        if (!slot.codecId().toString().equals(input ? link.sourcePort() : link.targetPort())) return false;
-        if (link.resourceFilters().stream().anyMatch(filter -> !slot.codecId().equals(filter.getCodecId()))) return false;
-        // Only input channels require a manifest; output channels accept resources allowed by their links.
-        return mekanism.api.qio.resource.QIOResourceCodecRegistry.INSTANCE.isRegistered(slot.codecId());
+        if (source != null && !sourcePort.id().equals(link.sourcePort())) return false;
+        if (target != null && !targetPort.id().equals(link.targetPort())) return false;
+        return true;
+    }
+
+    private static CloudworksPortDefinition port(ProductionLineData line, UUID nodeId, String portId,
+            CloudworksChannelNode channel) {
+        if (channel != null) {
+            try {
+                // 9.1: explicit archetype ports are the whole rule surface; port ids
+                // outside the declared set are invalid. Undeclared archetypes keep
+                // the historical mode-derived per-codec behaviour.
+                CloudworksSpecialNodeArchetype archetype =
+                        CloudworksSpecialNodeArchetypes.get(channel.archetypeId());
+                if (archetype != null && archetype.explicitPorts()) {
+                    for (CloudworksPortDefinition port : archetype.ports())
+                        if (port.id().equals(portId)) return port;
+                    return null;
+                }
+                return channel.mode().port(portId);
+            } catch (RuntimeException invalidCodec) {
+                return null;
+            }
+        }
+        MachineNodeData machine = find(line, nodeId);
+        if (machine == null) {
+            CloudworksAuxiliaryNodeData auxiliary = auxiliary(line, nodeId);
+            if (auxiliary == null) return null;
+            CloudworksAuxiliaryNodeType type =
+                    CloudworksAuxiliaryNodeRegistry.byItem(auxiliary.type());
+            if (type == null) return null;
+            for (CloudworksPortDefinition value : type.ports())
+                if (value.id().equals(portId)) return value;
+            return null;
+        }
+        MachineSlotLayout layout = machine == null ? null : machine.capabilities().slots();
+        MachineSlotLayout.Slot slot = layout == null ? null : layout.find(portId);
+        return slot == null ? null : CloudworksPortDefinition.machine(slot);
     }
 
     private static boolean claimPort(ProductionLineData line, UUID nodeId, String portId, Map<String, Integer> uses) {
@@ -195,6 +254,7 @@ public final class CloudworksTopologyValidator {
                 case "port does not allow multiple connections": return "editor_port_connection_limit";
                 case "link references an unknown node": return "editor_link_unknown_node";
                 case "channel link roles or codecs are incompatible": return "editor_channel_link_incompatible";
+                case "transfer input and transfer output cannot be linked directly": return "editor_transfer_channels_direct";
                 case "machine slot layout is not registered": return "editor_machine_layout_missing";
                 case "link references an unknown port": return "editor_link_unknown_port";
                 case "link roles are incompatible": return "editor_link_role_incompatible";

@@ -15,6 +15,70 @@ import mods.cloudworks.Recipes;
 import mods.cloudworks.Generators;
 import mods.cloudworks.Multiblocks;
 import mods.cloudworks.Thermal;
+import mods.cloudworks.Upgrades;
+import mods.cloudworks.LootDrops;
+import mods.cloudworks.Pumps;
+import mods.cloudworks.Storage;
+import crafttweaker.player.IPlayer;
+import crafttweaker.item.IItemStack;
+
+// 此函数只有显式调用后才替换全服泵规则；独立完整示例见 cloudworks_pumps.zh-CN.zs。
+function cloudworksPumpRulesExample() {
+    Pumps.remove("cloudworks:pump_water");
+    Pumps.biome("cloudworks_example:ocean_water", "minecraft:ocean", <liquid:water> * 1000, 20, 100, "native_water", "without");
+    Pumps.remove("cloudworks:pump_lava");
+    Pumps.add("cloudworks_example:nether_lava", "cloudworks:nether_heat_source", <liquid:lava> * 1000, 20, 100, "fixed", "any");
+}
+
+// 运行期奖励辅助函数。加载此示例不会自动调用，也不会凭空发放奖励。
+// 原料消耗、任务校验和只发一次由整合包负责；接口不扣背包物品。
+// terminalItemUploadsEnabled 只限制终端，不影响这些受信任的脚本入库。
+function rewardCloudMachines(player as IPlayer, supportedMachine as IItemStack) {
+    val request = Storage.addMachine(player, supportedMachine, 4);
+    // 后续服务器回调检查 request.done，再读取 accepted/error。
+    // 不要阻塞主线程，也不要因请求尚未完成就重复发放。
+}
+
+function rewardCloudSpeed(player as IPlayer) {
+    val request = Storage.addUpgradeType(player, "speed", 8);
+    // 自定义类型：Storage.addUpgradeType(player, "addonmod:module", 1);
+    // 按物品绑定：Storage.addUpgrade(player, Upgrades.getItem("energy"), 8);
+    // 团队云：Storage.addMachineTo(player, ownerUuid, supportedMachine, 4);
+}
+
+// MMCE 等外部多方块的云端传输：整合包自己负责扣输入和放输出。
+function mmceCloudTransfer(player as IPlayer, machine as IItemStack) {
+    val upload = Storage.uploadMachine(player, machine, 1);
+    val download = Storage.downloadMachine(player, machine, 1);
+    // 后续检查 upload.done/download.done；下载成功后将 download.machines
+    // 放入 MMCE 输出库存，云工坊不会直接操作外部库存。
+}
+// output() 和 chanceOutput() 受到玩家云端产出倍率影响。
+// 容器、催化剂返还请用 unscaledOutput(resource[, port]) 声明。
+// 守恒转换配方在构建器上调用 unscaledOutputs()，保持整份输出原量。
+
+// 产线池默认使用云工坊 speed_module/energy_module；Mek 升级作为节点 CUSTOM 模块安装。
+// 可选：替换产线池物品，不改变逐轴曲线；最终绑定不能与节点 CUSTOM 物品冲突。
+// 上传、下载严格使用相同的物品、元数据和 NBT 身份。
+// 存量池计数保留，下载时使用当前定义的物品。
+// Upgrades.setItem("speed", <minecraft:paper>.withTag({cloudUpgrade: "speed"}));
+// Upgrades.setItem("energy", <minecraft:paper>.withTag({cloudUpgrade: "energy"}));
+// 同一 Mek 升级物品已绑定节点模块时，useNativeItem("speed") 会报告冲突。
+// Upgrades.getItem("energy");
+
+// -----------------------------------------------------------------------------
+// 在冻结实体／箱子战利结果上追加概率掉落
+// -----------------------------------------------------------------------------
+// 这些是启动期声明，不会改写原战利品 JSON；相同物品的每条注入仍独立计算概率。
+// LootDrops.entity("minecraft:zombie", <minecraft:diamond>, 0.05);
+// LootDrops.entityRange("minecraft:skeleton", <minecraft:bone>, 1, 2, 0.25);
+// LootDrops.entityMeta("minecraft:zombie", <minecraft:coal>, 1, 1, 3, 0.10);
+//
+// 轴注入按模拟击杀和每张声明的结构箱表事件掷骰。
+// 一个结构有多张箱表时，每张箱表都会单独触发一次轴级注入。
+// LootDrops.axis("cloudworks:nether_fortress", <minecraft:emerald>, 0.01);
+// LootDrops.axisRange("cloudworks:nether_fortress", <minecraft:gold_ingot>, 1, 2, 0.05);
+// LootDrops.axisMeta("cloudworks:nether_fortress", <minecraft:coal>, 1, 1, 2, 0.05);
 
 // -----------------------------------------------------------------------------
 // 内置接入范围（自动注册；这里只列覆盖范围，不要重复调用注册）
@@ -35,10 +99,11 @@ import mods.cloudworks.Thermal;
 // 电动环境气体收集器、太阳能中子活化器、回旋式气液转换机、虚空矿物采集机、
 // 放射性废料桶、燃气发电机、风力发电机、太阳能发电机、高级太阳能发电机、
 // 化学结晶器、化学氧化机、营养液器、化学溶解室、种植工厂，以上均有四级；
-// 另有物品、气体、流体复制器。18 个等级机器族加 3 个复制器，共 75 个默认身份。
+// 另有四档电动泵，FILTER 产重水；19 个等级机器族加 3 个复制器，共 79 个默认身份。
+// Mek 默认还包含电动泵、SPS、手动矿辞转换器；Generators 包含生物质发电机和聚变控制器。
 // MultiblockMachine（安装后）：大型化学灌注器、大型化学清洗机、大型电解分离器、
 // 大型太阳能中子活化器、大型风力发电机、大型燃气发电机。
-// 所有可选依赖都存在时，固定默认注册总数为 198。实际配方内容在运行时从已安装模组
+// 所有可选依赖都存在时，固定默认注册总数为 207。实际配方内容在运行时从已安装模组
 // 的原生配方表读取，本脚本不再生成一份可能过期的重复配方清单。
 
 // -----------------------------------------------------------------------------
@@ -47,13 +112,24 @@ import mods.cloudworks.Thermal;
 val demoProcessor = <minecraft:stick>.withTag({cloudworksExample: "processor"});
 val processorSlots = Slots.create()
     .input("item_input", "mekanism:item_stack", 64)
+    .recipeFilteredInput("item_input", true) // 默认值；只接收有效配方输入
     .input("catalyst_input", "mekanism:item_stack", 64)
     .template("item_template", "mekanism:item_stack", 64)
     .output("item_output", "mekanism:item_stack", 64)
-    .add("single_link_input", "mekanism:item_stack", "INPUT", 64, false);
+    .add("single_link_input", "mekanism:item_stack", "INPUT", 64, false)
+    .recipeFilteredInput("single_link_input", false); // 通用耗材缓存；与单连接开关独立
 
 Machines.register(demoProcessor, 1, 10.0, 64000.0, 40, processorSlots);
 Machines.setProfile(demoProcessor, 2, 12.0, 96000.0, 40);
+// 2 是单台并行上限；不足两份也能开工，不同配方/到料时间可独立运行。
+// 新增通用合同入口（仅按需使用）：
+// Recipes.create("pack:cycle", 20).operationsPerCycle(4)...
+// Recipes.create("pack:powered", 1).input(一个精确输入).unscaledOutput(一个单位产物).powerDriven(1000000.0, 1000)...
+// Recipes.create("pack:secondary", 20).secondaryFuelInputs(true, false)... // 标注已有气体辅料；不自动添加输入
+// Recipes.create("pack:fuel", 1).input(一个精确燃料).prepaidFuel(等价资源, 200, 5.0)... // 每单位等价燃料的 J
+// 内置 SPS 与 Multiblocks.sps 共用按供能加工，不受云端产出倍率影响；ticks 只保留 API 参数兼容。
+// 词典目标在产线编辑窗口手动配置，不需要 CONFIGURATION 实物样板，不由启动脚本覆盖。
+Machines.setLineUpgradePolicy(demoProcessor, 8, 8); // 每台真实机器的产线额度；某轴为 0 则拒绝该轴
 
 // ingredient() 会在启动时展开当前矿辞候选。
 Recipes.create("cloudworks_example:ore_processor", 40)

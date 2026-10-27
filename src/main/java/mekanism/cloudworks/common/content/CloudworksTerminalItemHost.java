@@ -14,6 +14,11 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import mekanism.common.inventory.container.item.ItemStackSlotAccess;
+import java.util.concurrent.CompletableFuture;
+import java.util.UUID;
+import mekanism.cloudworks.common.registries.CloudworksItems;
+import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.item.Item;
 
 /** Portable terminal inventory persisted inside its host item, like the portable QIO dashboard. */
 public final class CloudworksTerminalItemHost implements CloudworksTerminalHost {
@@ -23,9 +28,9 @@ public final class CloudworksTerminalItemHost implements CloudworksTerminalHost 
     private final ItemStackSlotAccess itemAccess;
     private final boolean remote;
     private final EntityPlayer context;
-    private final net.minecraft.item.Item hostItem;
-    private java.util.UUID terminalId;
-    private java.util.concurrent.CompletableFuture<Void> playerSave;
+    private final Item hostItem;
+    private UUID terminalId;
+    private CompletableFuture<Void> playerSave;
     private NBTTagCompound savedIdentity;
     private final IContentsListener persistListener = this::persist;
     private final List<IInventorySlot> slots;
@@ -49,9 +54,9 @@ public final class CloudworksTerminalItemHost implements CloudworksTerminalHost 
                 terminal.setTagCompound(tag);
             }
             if (tag.hasKey("cloudTerminalId"))
-                terminalId = java.util.UUID.fromString(tag.getString("cloudTerminalId"));
+                terminalId = UUID.fromString(tag.getString("cloudTerminalId"));
             else {
-                terminalId = java.util.UUID.randomUUID();
+                terminalId = UUID.randomUUID();
                 tag.setString("cloudTerminalId", terminalId.toString());
             }
         }
@@ -59,7 +64,7 @@ public final class CloudworksTerminalItemHost implements CloudworksTerminalHost 
     }
 
     @Override
-    public java.util.UUID terminalId() {
+    public UUID terminalId() {
         return Objects.requireNonNull(terminalId, "Server terminal identity");
     }
 
@@ -77,20 +82,24 @@ public final class CloudworksTerminalItemHost implements CloudworksTerminalHost 
         return itemAccess;
     }
 
+    @Override public boolean allowsOwnerChange() {
+        return hostItem == CloudworksItems.TeamTerminal;
+    }
+
     private ItemStack requireHostStack() {
         if (!available()) throw new IllegalStateException("Portable terminal host was replaced");
         return itemAccess.getStack();
     }
 
     @Override
-    public java.util.UUID appliedTerminalTransfer() {
+    public UUID appliedTerminalTransfer() {
         ItemStack stack = requireHostStack();
         return stack.hasTagCompound() && stack.getTagCompound().hasKey("cloudTerminalApplied", 8)
-                ? java.util.UUID.fromString(stack.getTagCompound().getString("cloudTerminalApplied")) : null;
+                ? UUID.fromString(stack.getTagCompound().getString("cloudTerminalApplied")) : null;
     }
 
     @Override
-    public void acknowledgeTerminalTransfer(java.util.UUID transferId) {
+    public void acknowledgeTerminalTransfer(UUID transferId) {
         ItemStack stack = requireHostStack();
         if (!stack.hasTagCompound()) stack.setTagCompound(new NBTTagCompound());
         stack.getTagCompound().setString("cloudTerminalApplied", transferId.toString());
@@ -101,7 +110,7 @@ public final class CloudworksTerminalItemHost implements CloudworksTerminalHost 
         persist();
         NBTTagCompound current = requireHostStack().writeToNBT(new NBTTagCompound());
         if (current.equals(savedIdentity) && playerSave != null && !playerSave.isCompletedExceptionally()) return;
-        if (context instanceof net.minecraft.entity.player.EntityPlayerMP player && player.getServer() != null)
+        if (context instanceof EntityPlayerMP player && player.getServer() != null)
             playerSave = CloudworksTerminalPersistence.savePlayer(player);
         savedIdentity = current;
     }

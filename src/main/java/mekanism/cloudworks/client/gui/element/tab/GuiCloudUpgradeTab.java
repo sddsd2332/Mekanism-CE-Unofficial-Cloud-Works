@@ -16,6 +16,7 @@ import net.minecraft.util.text.ITextComponent;
 import net.minecraft.util.text.TextComponentString;
 
 import java.util.function.Supplier;
+import mekanism.cloudworks.api.module.CloudworksUpgradeItems;
 
 public final class GuiCloudUpgradeTab extends GuiWindowCreatorTab<Void, GuiCloudUpgradeTab> {
     private final ContainerCloudworks container;
@@ -51,7 +52,8 @@ public final class GuiCloudUpgradeTab extends GuiWindowCreatorTab<Void, GuiCloud
     protected void drawBackgroundOverlay() {
         int iconX = getButtonX() + (innerWidth - 14) / 2;
         int iconY = getButtonY() + (innerHeight - 14) / 2;
-        gui().renderItemWithOverlay(Upgrade.SPEED.getStack(), iconX, iconY, 0.875F, null);
+        gui().renderItemWithOverlay(CloudworksUpgradeItems.currentStack(Upgrade.SPEED),
+                iconX, iconY, 0.875F, null);
         MekanismRenderer.resetColor();
     }
 }

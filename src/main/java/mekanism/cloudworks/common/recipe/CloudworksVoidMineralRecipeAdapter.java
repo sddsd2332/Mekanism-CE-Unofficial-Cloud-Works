@@ -41,18 +41,4 @@ public final class CloudworksVoidMineralRecipeAdapter extends CloudworksNativeRe
         return new CloudworksRecipeBatch().chooseItemOutput(candidates, amount);
     }
 
-    @Override
-    public CloudworksOperation createOperation(MachineNodeData node, Object recipe, int operations, int ticks) {
-        List<ItemStack> candidates = registered(recipe);
-        if (node.operation() != null || candidates == null || operations <= 0) return null;
-        Map<QIOResourceDescriptor, Long> totals = new LinkedHashMap<>();
-        for (int operation = 0; operation < operations; operation++) {
-            ItemStack selected = candidates.get(ThreadLocalRandom.current().nextInt(candidates.size()));
-            totals.merge(QIOResourceCodecs.item(selected), (long) amount, Math::addExact);
-        }
-        List<CloudworksResourceStack> output = new ArrayList<>();
-        totals.forEach((resource, quantity) -> output.add(new CloudworksResourceStack(resource, quantity)));
-        return CloudworksResourceCapacity.canOutput(node, output)
-                ? new CloudworksOperation(operations, Math.max(1, ticks), Collections.emptyList(), output) : null;
-    }
 }

@@ -3,24 +3,25 @@ package mekanism.cloudworks.client.gui.element;
 import java.util.Collections;
 import java.util.List;
 import java.util.function.Function;
-import java.util.function.IntSupplier;
 import java.util.function.IntConsumer;
+import java.util.function.IntSupplier;
+import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import mekanism.client.gui.IGuiWrapper;
 import mekanism.client.gui.element.GuiElement;
-import mekanism.client.gui.element.slot.GuiSlot;
 import mekanism.client.gui.element.scroll.GuiScrollBar;
 import mekanism.client.render.MekanismRenderer;
 import mekanism.common.inventory.ISlotClickHandler.IScrollableSlot;
 import mekanism.common.lib.inventory.HashedItem;
 import mekanism.common.util.MekanismUtils;
 import mekanism.common.util.UnitDisplayUtils;
+import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.ResourceLocation;
-import net.minecraft.util.text.TextComponentString;
 
 import static mekanism.client.gui.GuiUtils.blit;
-import static mekanism.client.gui.GuiUtils.fill;
+import java.util.function.IntPredicate;
+import java.util.UUID;
 
 /**
  * Mekanism's GuiSlotScroll with a small Cloudworks-specific tooltip hook and
@@ -40,11 +41,25 @@ public class GuiCloudSlotScroll extends GuiElement {
     private final IntSupplier selectedIndex;
     private final Function<Integer, List<String>> tooltipLines;
     private final GuiScrollBar scrollBar;
-    private java.util.function.IntPredicate enabledSlot = index -> true;
+    private IntPredicate enabledSlot = index -> true;
+    private LongSupplier slotVersion;
+    private long cachedSlotVersion = Long.MIN_VALUE;
+    private List<IScrollableSlot> cachedSlots = Collections.emptyList();
 
-    public GuiCloudSlotScroll enabledSlots(java.util.function.IntPredicate predicate) {
+    public GuiCloudSlotScroll cacheByVersion(LongSupplier version) {
+        slotVersion = version;
+        cachedSlotVersion = Long.MIN_VALUE;
+        cachedSlots = Collections.emptyList();
+        return this;
+    }
+
+    public GuiCloudSlotScroll enabledSlots(IntPredicate predicate) {
         enabledSlot = predicate;
         return this;
+    }
+
+    public void resetScroll() {
+        scrollBar.resetScroll();
     }
 
     public GuiCloudSlotScroll(IGuiWrapper gui, int x, int y, int xSlots, int ySlots,
@@ -75,18 +90,10 @@ public class GuiCloudSlotScroll extends GuiElement {
             }
             int slotX = relativeX + (i % xSlots) * 18;
             int slotY = relativeY + (i / xSlots) * 18;
-            if (slot == selectedIndex.getAsInt()) {
-                fill(slotX + 1, slotY + 1, slotX + 17, slotY + 17, GuiSlot.DEFAULT_HOVER_COLOR);
-                MekanismRenderer.resetColor();
-            }
             ItemStack stack = list.get(slot).getInternalStack();
             if (!stack.isEmpty()) {
                 gui().renderItemWithOverlay(stack, slotX + 1, slotY + 1, 1, "");
                 renderSlotCount(list.get(slot).count(), slotX + 1, slotY + 1);
-            }
-            if (!enabledSlot.test(slot)) {
-                fill(slotX + 1, slotY + 1, slotX + 17, slotY + 17, 0xA0808080);
-                MekanismRenderer.resetColor();
             }
         }
     }
@@ -94,13 +101,20 @@ public class GuiCloudSlotScroll extends GuiElement {
     @Override
     public void renderForeground(int mouseX, int mouseY) {
         super.renderForeground(mouseX, mouseY);
-        int slot = slotAt(mouseX, mouseY);
-        if (slot >= 0 && slot == selectedIndex.getAsInt()) {
-            int local = slot - scrollBar.getCurrentSelection() * xSlots;
-            int slotX = relativeX + local % xSlots * 18 + 1;
-            int slotY = relativeY + local / xSlots * 18 + 1;
-            fill(slotX, slotY, slotX + 16, slotY + 16, GuiSlot.DEFAULT_HOVER_COLOR);
-            MekanismRenderer.resetColor();
+        int hoveredSlot = slotAt(mouseX, mouseY);
+        int selected = selectedIndex.getAsInt();
+        int firstSlot = scrollBar.getCurrentSelection() * xSlots;
+        List<IScrollableSlot> list = getSlotList();
+        for (int visible = 0; visible < xSlots * ySlots; visible++) {
+            int slotIndex = firstSlot + visible;
+            if (slotIndex >= list.size()) {
+                break;
+            }
+            int slotX = relativeX + visible % xSlots * 18;
+            int slotY = relativeY + visible / xSlots * 18;
+            boolean enabled = enabledSlot.test(slotIndex);
+            CloudworksSlotRenderer.draw(slotX, slotY, slotIndex == selected, enabled,
+                    slotIndex == hoveredSlot);
         }
     }
 
@@ -136,6 +150,14 @@ public class GuiCloudSlotScroll extends GuiElement {
     }
 
     private List<IScrollableSlot> getSlotList() {
+        if (slotVersion != null) {
+            long version = slotVersion.getAsLong();
+            if (version == cachedSlotVersion) return cachedSlots;
+            List<IScrollableSlot> list = slotList.get();
+            cachedSlots = list == null ? Collections.emptyList() : list;
+            cachedSlotVersion = version;
+            return cachedSlots;
+        }
         List<IScrollableSlot> list = slotList.get();
         return list == null ? Collections.emptyList() : list;
     }
@@ -160,12 +182,16 @@ public class GuiCloudSlotScroll extends GuiElement {
             return;
         }
         String text = count < 10_000 ? Long.toString(count) : UnitDisplayUtils.getDisplay(count, 1);
+        GlStateManager.pushMatrix();
         MekanismRenderer.resetColor();
         float scale = 0.6F;
         int width = getFont().getStringWidth(text);
         scale = Math.min(1, 16F / (width * scale)) * scale;
-        drawTextWithScale(new TextComponentString(text), x + 16 - width * scale,
-                y + 9, 0xFFFFFF, scale);
+        float yAdd = 4 - (scale * 8) / 2F;
+        GlStateManager.translate(x + 16 - width * scale, y + 9 + yAdd, 200F);
+        GlStateManager.scale(scale, scale, scale);
+        getFont().drawString(text, 0, 0, 0xFFFFFF);
+        GlStateManager.popMatrix();
     }
 
     public static IScrollableSlot slot(ItemStack stack, long count) {
@@ -178,7 +204,7 @@ public class GuiCloudSlotScroll extends GuiElement {
             }
 
             @Override
-            public java.util.UUID itemUUID() {
+            public UUID itemUUID() {
                 return null;
             }
 

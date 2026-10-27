@@ -5,6 +5,9 @@ import net.minecraft.nbt.NBTTagList;
 import net.minecraftforge.common.util.Constants.NBT;
 
 import java.util.*;
+import mekanism.cloudworks.common.config.CloudworksConfig;
+import mekanism.cloudworks.common.service.CloudworksOutputMultiplier;
+import net.minecraft.nbt.NBTTagString;
 
 public final class CloudworksData {
     public static final int SCHEMA_VERSION = 1;
@@ -41,6 +44,14 @@ public final class CloudworksData {
      */
     private int energyUpgradePool;
     /**
+     * 云端自定义升级池: 命名空间类型 → 数量; 未知集成条目原样保留.
+     */
+    private CloudworksUpgradeSet customUpgradePool = new CloudworksUpgradeSet();
+    /**
+     * 云级效果状态: 通用通道卡片效果的等级表; 内置效果仍用专有字段(见 NBT 文档映射表).
+     */
+    private CloudworksEffectState cloudEffects = new CloudworksEffectState();
+    /**
      * Configurable energy flow: receiving relay feeds the cloud processing pool.
      */
     private boolean energyFlowReceivingToCloud = true;
@@ -63,10 +74,9 @@ public final class CloudworksData {
     private int unlockedLines = 1;
     private int maxLines = 1;
     private int workRate = 1;
+    private int outputMultiplierUnits = CloudworksOutputMultiplier.SCALE;
     private int maxMachineNodes = DEFAULT_MAX_MACHINE_NODES;
-    private int simulatedHeight;
-    private int lavaHeatCards;
-    private boolean netherEnvironmentCard;
+    private int warehouseCapMultiplier = 1;
     /**
      * Staging inventories are unlimited; only channel buffers keep a real capacity.
      */
@@ -87,8 +97,8 @@ public final class CloudworksData {
     }
 
     public static CloudworksData create(UUID owner) {
-        mekanism.cloudworks.common.config.CloudworksConfig.Settings settings =
-                mekanism.cloudworks.common.config.CloudworksConfig.settings();
+        CloudworksConfig.Settings settings =
+                CloudworksConfig.settings();
         CloudworksData data = new CloudworksData(owner);
         data.setEnergy(0, settings.cloudCapacity, false);
         data.setWarehouseCapacities(settings.receivingCapacity, settings.sendingCapacity);
@@ -97,7 +107,9 @@ public final class CloudworksData {
         return data;
     }
 
-    /** Runtime-private template copy, without NBT or codec resolution. */
+    /**
+     * Runtime-private template copy, without NBT or codec resolution.
+     */
     public CloudworksData copyForRuntime() {
         CloudworksData copy = new CloudworksData(owner);
         copy.enabled = enabled;
@@ -107,6 +119,8 @@ public final class CloudworksData {
         copy.sendingEnergy = sendingEnergy;
         copy.speedUpgradePool = speedUpgradePool;
         copy.energyUpgradePool = energyUpgradePool;
+        copy.customUpgradePool = customUpgradePool.copy();
+        copy.cloudEffects = cloudEffects.copy();
         copy.energyFlowReceivingToCloud = energyFlowReceivingToCloud;
         copy.energyFlowReceivingToLines = energyFlowReceivingToLines;
         copy.energyFlowCloudToSending = energyFlowCloudToSending;
@@ -119,10 +133,9 @@ public final class CloudworksData {
         copy.unlockedLines = unlockedLines;
         copy.maxLines = maxLines;
         copy.workRate = workRate;
+        copy.outputMultiplierUnits = outputMultiplierUnits;
         copy.maxMachineNodes = maxMachineNodes;
-        copy.simulatedHeight = simulatedHeight;
-        copy.lavaHeatCards = lavaHeatCards;
-        copy.netherEnvironmentCard = netherEnvironmentCard;
+        copy.warehouseCapMultiplier = warehouseCapMultiplier;
         copy.receiving = receiving.copy();
         copy.transfer = transfer.copy();
         copy.sending = sending.copy();
@@ -139,7 +152,8 @@ public final class CloudworksData {
 
     public static CloudworksData read(NBTTagCompound tag) {
         CloudworksDataChecks.fields(tag, 8, "owner");
-        CloudworksDataChecks.fields(tag, 1, "enabled", "offlineProcessingUnlocked", "unlimitedEnergy", "recycleToTransfer", "flowReceivingToCloud", "flowReceivingToLines", "flowCloudToSending", "flowLinesToSending");
+        CloudworksDataChecks.fields(tag, 1, "enabled", "offlineProcessingUnlocked", "unlimitedEnergy",
+                "flowReceivingToCloud", "flowReceivingToLines", "flowCloudToSending", "flowLinesToSending");
         CloudworksDataChecks.fields(tag, 6, "energy", "maxEnergy", "receivingEnergy", "sendingEnergy");
         CloudworksDataChecks.fields(tag, 3, "unlockedLines", "maxLines", "workRate", "maxMachineNodes", "speedUpgradePool", "energyUpgradePool");
         CloudworksDataChecks.schema(tag, SCHEMA_VERSION);
@@ -157,14 +171,15 @@ public final class CloudworksData {
                 || tag.getInteger("workRate") < 1)
             throw new IllegalArgumentException("Invalid cloud limits");
         data.setLimits(tag.getInteger("unlockedLines"), tag.getInteger("maxLines"), tag.getInteger("workRate"));
+        if (tag.hasKey("outputMultiplierUnits")) {
+            CloudworksDataChecks.field(tag, "outputMultiplierUnits", NBT.TAG_INT);
+            data.setOutputMultiplierUnits(tag.getInteger("outputMultiplierUnits"));
+        }
         data.maxMachineNodes = tag.getInteger("maxMachineNodes");
         if (data.maxMachineNodes < 1) throw new IllegalArgumentException("Invalid node limit");
-        data.simulatedHeight = tag.hasKey("simulatedHeight", NBT.TAG_INT)
-                ? Math.max(0, Math.min(256, tag.getInteger("simulatedHeight"))) : 0;
-        data.lavaHeatCards = tag.hasKey("lavaHeatCards", NBT.TAG_INT)
-                ? Math.max(0, Math.min(7, tag.getInteger("lavaHeatCards"))) : 0;
-        data.netherEnvironmentCard = tag.hasKey("netherEnvironmentCard", NBT.TAG_BYTE)
-                && tag.getBoolean("netherEnvironmentCard");
+        data.warehouseCapMultiplier = tag.hasKey("warehouseCapMultiplier", NBT.TAG_INT)
+                ? tag.getInteger("warehouseCapMultiplier") : 1;
+        if (data.warehouseCapMultiplier < 1) throw new IllegalArgumentException("Invalid warehouse cap multiplier");
         data.recycleToTransfer = !tag.hasKey("recycleToTransfer") || tag.getBoolean("recycleToTransfer");
         // Warehouse energy relays and flow gates: development phase, no old-save
         // compatibility — every written record carries all keys.
@@ -172,6 +187,8 @@ public final class CloudworksData {
         data.sendingEnergy = tag.getDouble("sendingEnergy");
         data.speedUpgradePool = tag.getInteger("speedUpgradePool");
         data.energyUpgradePool = tag.getInteger("energyUpgradePool");
+        data.customUpgradePool = CloudworksUpgradeSet.read(tag, "customUpgradePool");
+        data.cloudEffects = CloudworksEffectState.read(tag, "cloudEffects");
         if (!Double.isFinite(data.receivingEnergy) || data.receivingEnergy < 0
                 || !Double.isFinite(data.sendingEnergy) || data.sendingEnergy < 0
                 || data.speedUpgradePool < 0 || data.energyUpgradePool < 0)
@@ -243,8 +260,31 @@ public final class CloudworksData {
         return maxLines;
     }
 
+    public int warehouseCapMultiplier() {
+        return warehouseCapMultiplier;
+    }
+
+    public void setWarehouseCapMultiplier(int value) {
+        if (value < 1) throw new IllegalArgumentException("Invalid warehouse cap multiplier");
+        warehouseCapMultiplier = value;
+    }
+
+    public long effectiveWarehouseItemCap() {
+        return Math.multiplyExact(
+                CloudworksConfig.settings().warehouseItemTypeCap,
+                (long) warehouseCapMultiplier);
+    }
+
     public int workRate() {
         return workRate;
+    }
+
+    public int outputMultiplierUnits() {
+        return outputMultiplierUnits;
+    }
+
+    public void setOutputMultiplierUnits(int units) {
+        outputMultiplierUnits = CloudworksOutputMultiplier.validate(units);
     }
 
     /**
@@ -253,14 +293,6 @@ public final class CloudworksData {
     public int maxMachineNodes() {
         return maxMachineNodes;
     }
-
-    public int simulatedHeight() { return simulatedHeight; }
-    public int lavaHeatCards() { return lavaHeatCards; }
-    public boolean netherEnvironmentCard() { return netherEnvironmentCard; }
-
-    public void setSimulatedHeight(int value) { simulatedHeight = Math.max(0, Math.min(256, value)); }
-    public void setLavaHeatCards(int value) { lavaHeatCards = Math.max(0, Math.min(7, value)); }
-    public void setNetherEnvironmentCard(boolean value) { netherEnvironmentCard = value; }
 
     public void setMaxMachineNodes(int value) {
         maxMachineNodes = Math.max(1, value);
@@ -291,8 +323,13 @@ public final class CloudworksData {
         return sendingEnergy;
     }
 
-    public double receivingEnergyCapacity() { return unlimitedEnergy ? Double.MAX_VALUE : receivingMaxEnergy; }
-    public double sendingEnergyCapacity() { return unlimitedEnergy ? Double.MAX_VALUE : sendingMaxEnergy; }
+    public double receivingEnergyCapacity() {
+        return unlimitedEnergy ? Double.MAX_VALUE : receivingMaxEnergy;
+    }
+
+    public double sendingEnergyCapacity() {
+        return unlimitedEnergy ? Double.MAX_VALUE : sendingMaxEnergy;
+    }
 
     public void setWarehouseCapacities(double receiving, double sending) {
         if (!Double.isFinite(receiving) || !Double.isFinite(sending) || receiving < 0 || sending < 0)
@@ -301,16 +338,34 @@ public final class CloudworksData {
         sendingMaxEnergy = sending;
     }
 
-    /** 云端升级池读数: speed (true) / energy (false). */
+    /**
+     * 云端升级池读数: speed (true) / energy (false).
+     */
     public int upgradePool(boolean speed) {
         return speed ? speedUpgradePool : energyUpgradePool;
     }
 
-    /** 云端升级池增减: 正数入库（回池），负数出库（安装扣减）; 返回新值. */
+    /**
+     * 云端升级池增减: 正数入库（回池），负数出库（安装扣减）; 返回新值.
+     */
     public int addUpgradePool(boolean speed, int delta) {
         if (speed) speedUpgradePool = Math.addExact(speedUpgradePool, delta);
         else energyUpgradePool = Math.addExact(energyUpgradePool, delta);
         return speed ? speedUpgradePool : energyUpgradePool;
+    }
+
+    /**
+     * 云端自定义升级池: 命名空间类型 → 数量; 未知集成条目原样保留.
+     */
+    public CloudworksUpgradeSet customUpgradePool() {
+        return customUpgradePool;
+    }
+
+    /**
+     * 通用通道云级效果等级表; 内置效果专有字段之外的唯一载体.
+     */
+    public CloudworksEffectState cloudEffects() {
+        return cloudEffects;
     }
 
     /**
@@ -324,28 +379,80 @@ public final class CloudworksData {
         this.sendingEnergy = Math.min(sending, sendingEnergyCapacity());
     }
 
+    // 8.4: gate accessors delegate to the unified CloudworksFlowGates view;
+    // the stored fields above stay the single truth (schema unchanged).
     public boolean energyFlowReceivingToCloud() {
-        return energyFlowReceivingToCloud;
+        return flowGates.gate(CloudworksFlowGate.RECEIVING_TO_CLOUD);
     }
 
     public boolean energyFlowReceivingToLines() {
-        return energyFlowReceivingToLines;
+        return flowGates.gate(CloudworksFlowGate.RECEIVING_TO_LINES);
     }
 
     public boolean energyFlowCloudToSending() {
-        return energyFlowCloudToSending;
+        return flowGates.gate(CloudworksFlowGate.CLOUD_TO_SENDING);
     }
 
     public boolean energyFlowLinesToSending() {
-        return energyFlowLinesToSending;
+        return flowGates.gate(CloudworksFlowGate.LINES_TO_SENDING);
     }
 
     public void setEnergyFlows(boolean receivingToCloud, boolean receivingToLines, boolean cloudToSending, boolean linesToSending) {
-        this.energyFlowReceivingToCloud = receivingToCloud;
-        this.energyFlowReceivingToLines = receivingToLines;
-        this.energyFlowCloudToSending = cloudToSending;
-        this.energyFlowLinesToSending = linesToSending;
+        flowGates.set(CloudworksFlowGate.RECEIVING_TO_CLOUD, receivingToCloud);
+        flowGates.set(CloudworksFlowGate.RECEIVING_TO_LINES, receivingToLines);
+        flowGates.set(CloudworksFlowGate.CLOUD_TO_SENDING, cloudToSending);
+        flowGates.set(CloudworksFlowGate.LINES_TO_SENDING, linesToSending);
     }
+
+    /**
+     * Unified gate view over this cloud's four flow gates.
+     */
+    public CloudworksFlowGates flowGates() {
+        return flowGates;
+    }
+
+    private final CloudworksFlowGates flowGates = new CloudworksFlowGates() {
+        @Override
+        public CloudworksFlowGate.Scope scope() {
+            return CloudworksFlowGate.Scope.CLOUD;
+        }
+
+        @Override
+        public boolean gate(CloudworksFlowGate gate) {
+            switch (gate) {
+                case RECEIVING_TO_CLOUD:
+                    return energyFlowReceivingToCloud;
+                case RECEIVING_TO_LINES:
+                    return energyFlowReceivingToLines;
+                case CLOUD_TO_SENDING:
+                    return energyFlowCloudToSending;
+                case LINES_TO_SENDING:
+                    return energyFlowLinesToSending;
+                default:
+                    throw new IllegalArgumentException("Not a cloud flow gate: " + gate);
+            }
+        }
+
+        @Override
+        public void set(CloudworksFlowGate gate, boolean value) {
+            switch (gate) {
+                case RECEIVING_TO_CLOUD:
+                    energyFlowReceivingToCloud = value;
+                    break;
+                case RECEIVING_TO_LINES:
+                    energyFlowReceivingToLines = value;
+                    break;
+                case CLOUD_TO_SENDING:
+                    energyFlowCloudToSending = value;
+                    break;
+                case LINES_TO_SENDING:
+                    energyFlowLinesToSending = value;
+                    break;
+                default:
+                    throw new IllegalArgumentException("Not a cloud flow gate: " + gate);
+            }
+        }
+    };
 
     public List<UUID> lineIds() {
         return lineIds;
@@ -430,7 +537,9 @@ public final class CloudworksData {
         return writeProjection(receiving.write(), transfer.write(), sending.write());
     }
 
-    /** Runtime projections reuse unchanged frozen warehouse tags. */
+    /**
+     * Runtime projections reuse unchanged frozen warehouse tags.
+     */
     public NBTTagCompound writeProjection(NBTTagCompound receiving, NBTTagCompound transfer, NBTTagCompound sending) {
         NBTTagCompound tag = writeCore();
         tag.setTag("receiving", receiving);
@@ -458,21 +567,22 @@ public final class CloudworksData {
         tag.setInteger("unlockedLines", unlockedLines);
         tag.setInteger("maxLines", maxLines);
         tag.setInteger("workRate", workRate);
+        tag.setInteger("outputMultiplierUnits", outputMultiplierUnits);
         tag.setInteger("maxMachineNodes", maxMachineNodes);
-        tag.setInteger("simulatedHeight", simulatedHeight);
-        tag.setInteger("lavaHeatCards", lavaHeatCards);
-        tag.setBoolean("netherEnvironmentCard", netherEnvironmentCard);
+        tag.setInteger("warehouseCapMultiplier", warehouseCapMultiplier);
         tag.setBoolean("recycleToTransfer", recycleToTransfer);
         tag.setDouble("receivingEnergy", receivingEnergy);
         tag.setDouble("sendingEnergy", sendingEnergy);
         tag.setInteger("speedUpgradePool", speedUpgradePool);
         tag.setInteger("energyUpgradePool", energyUpgradePool);
+        customUpgradePool.write(tag, "customUpgradePool");
+        cloudEffects.write(tag, "cloudEffects");
         tag.setBoolean("flowReceivingToCloud", energyFlowReceivingToCloud);
         tag.setBoolean("flowReceivingToLines", energyFlowReceivingToLines);
         tag.setBoolean("flowCloudToSending", energyFlowCloudToSending);
         tag.setBoolean("flowLinesToSending", energyFlowLinesToSending);
         NBTTagList lines = new NBTTagList();
-        for (UUID id : lineIds) lines.appendTag(new net.minecraft.nbt.NBTTagString(id.toString()));
+        for (UUID id : lineIds) lines.appendTag(new NBTTagString(id.toString()));
         tag.setTag("lineIds", lines);
         return tag;
     }
@@ -487,6 +597,8 @@ public final class CloudworksData {
         sendingEnergy = next.sendingEnergy;
         speedUpgradePool = next.speedUpgradePool;
         energyUpgradePool = next.energyUpgradePool;
+        customUpgradePool = next.customUpgradePool.copy();
+        cloudEffects = next.cloudEffects.copy();
         energyFlowReceivingToCloud = next.energyFlowReceivingToCloud;
         energyFlowReceivingToLines = next.energyFlowReceivingToLines;
         energyFlowCloudToSending = next.energyFlowCloudToSending;
@@ -499,10 +611,9 @@ public final class CloudworksData {
         unlockedLines = next.unlockedLines;
         maxLines = next.maxLines;
         workRate = next.workRate;
+        outputMultiplierUnits = next.outputMultiplierUnits;
         maxMachineNodes = next.maxMachineNodes;
-        simulatedHeight = next.simulatedHeight;
-        lavaHeatCards = next.lavaHeatCards;
-        netherEnvironmentCard = next.netherEnvironmentCard;
+        warehouseCapMultiplier = next.warehouseCapMultiplier;
         lineIds.clear();
         lineIds.addAll(next.lineIds);
     }

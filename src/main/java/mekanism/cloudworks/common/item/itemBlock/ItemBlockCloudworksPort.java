@@ -16,6 +16,14 @@ import net.minecraft.world.World;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.util.UUID;
+import mekanism.cloudworks.common.block.BlockCloudTeamInput;
+import mekanism.cloudworks.common.block.BlockCloudTeamOutput;
+import mekanism.cloudworks.common.team.CloudworksTeamContext;
+import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.util.EnumActionResult;
+import net.minecraft.util.EnumFacing;
+import net.minecraft.util.EnumHand;
+import net.minecraft.util.text.TextComponentTranslation;
 
 /**
  * QIO-style external storage reference with Mek security and placement data.
@@ -27,6 +35,23 @@ public class ItemBlockCloudworksPort extends ItemBlock
     public ItemBlockCloudworksPort(Block block) {
         super(block);
         setMaxStackSize(1);
+    }
+
+    @Nonnull
+    @Override public EnumActionResult onItemUse(EntityPlayer player,
+            World world, BlockPos pos, EnumHand hand, EnumFacing facing,
+            float hitX, float hitY, float hitZ) {
+        if (!world.isRemote && (block instanceof BlockCloudTeamInput
+                || block instanceof BlockCloudTeamOutput)) {
+            ItemStack stack = player.getHeldItem(hand);
+            UUID team = stack.hasTagCompound() && stack.getTagCompound().hasKey("cwPortId", 8)
+                    ? getOwnerUUID(stack) : CloudworksTeamContext.owner(player);
+            if (!CloudworksTeamContext.canAccess(player, team)) {
+                player.sendMessage(new TextComponentTranslation("cloudworks.error.team_required"));
+                return EnumActionResult.FAIL;
+            }
+        }
+        return super.onItemUse(player, world, pos, hand, facing, hitX, hitY, hitZ);
     }
 
     @Override

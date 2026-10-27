@@ -12,6 +12,6 @@ public final class CloudworksAdvancedGasItemRecipeAdapter extends CloudworksNati
 
     @Override
     protected CloudworksRecipeBatch describe(AdvancedMachineRecipe<?> recipe) {
-        return new CloudworksRecipeBatch().item(recipe.getItemInput()).gas(recipe.getGasInput(), 200L * recipe.getGasInput().amount).output(recipe.getOutput().output);
+        return new CloudworksRecipeBatch().secondaryGasInputs().item(recipe.getItemInput()).gas(recipe.getGasInput(), 200L * recipe.getGasInput().amount).output(recipe.getOutput().output);
     }
 }

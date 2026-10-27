@@ -17,6 +17,7 @@ import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.text.TextComponentString;
 import mekanism.common.util.LangUtils;
+import java.util.Collections;
 
 /**
  * QIO JobList-style production-line directory.
@@ -171,7 +172,7 @@ public final class GuiCloudLineList extends GuiScrollList {
 
         public Entry(UUID id, String name, boolean enabled, int nodes,
                 double energy, double maxEnergy, ItemStack icon) {
-            this(id, name, enabled, nodes, energy, maxEnergy, icon, java.util.Collections.emptyList());
+            this(id, name, enabled, nodes, energy, maxEnergy, icon, Collections.emptyList());
         }
 
         public Entry(UUID id, String name, boolean enabled, int nodes,

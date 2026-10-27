@@ -6,6 +6,7 @@ import mekanism.common.MekanismFluids;
 import mekanism.common.config.MekanismConfig;
 import net.minecraftforge.fluids.FluidRegistry;
 import net.minecraftforge.fluids.FluidStack;
+import java.util.Objects;
 
 public final class CloudworksFissionReactorRecipeAdapter extends CloudworksMultiblockRecipeAdapter {
     public CloudworksFissionReactorRecipeAdapter(boolean sodium, int ticks) {
@@ -21,12 +22,12 @@ public final class CloudworksFissionReactorRecipeAdapter extends CloudworksMulti
         if (!Double.isFinite(amount) || amount < 1 || amount > Integer.MAX_VALUE)
             throw new IllegalArgumentException("Invalid fission coolant yield");
         int coolant = (int) Math.floor(amount);
-        CloudworksRecipeBatch batch = new CloudworksRecipeBatch()
+        CloudworksRecipeBatch batch = new CloudworksRecipeBatch().unscaledOutputs()
                 .gas(new GasStack(MekanismFluids.FissileFuel, 1), 1, "fuel_input")
                 .output(new GasStack(MekanismFluids.NuclearWaste, 1), "waste_output");
         if (sodium) return batch.gas(new GasStack(MekanismFluids.Sodium, 1), coolant, "coolant_input")
                 .output(new GasStack(MekanismFluids.SuperheatedSodium, coolant), "heated_coolant_output");
         return batch.fluid(new FluidStack(FluidRegistry.WATER, coolant))
-                .output(new FluidStack(java.util.Objects.requireNonNull(FluidRegistry.getFluid("steam"), "steam"), coolant), "steam_output");
+                .output(new FluidStack(Objects.requireNonNull(FluidRegistry.getFluid("steam"), "steam"), coolant), "steam_output");
     }
 }

@@ -1,10 +1,13 @@
 package mekanism.cloudworks.common.runtime;
 
-import mekanism.cloudworks.api.CloudworksThermalPlan;
-import mekanism.cloudworks.api.CloudworksThermalPlan.Kind;
+import mekanism.cloudworks.api.machine.CloudworksThermalPlan;
+import mekanism.cloudworks.api.machine.CloudworksThermalPlan.Kind;
 import mekanism.cloudworks.common.service.CloudworksQuantities;
+import mekanism.cloudworks.api.environment.CloudworksGenerationPlan;
 
-/** Native-free thermal dynamics. Resource mutations and heat changes share one worker tick. */
+/**
+ * Native-free thermal dynamics. Resource mutations and heat changes share one worker tick.
+ */
 final class CloudworksRuntimeThermalSystem {
     private final CloudworksRuntimeProgram program;
     private final CloudworksRuntimeMachineStore machines;
@@ -16,14 +19,24 @@ final class CloudworksRuntimeThermalSystem {
     private final double[] temperature, minimum, maximum, outgoing, incoming, requested, produced, consumed, loss;
 
     CloudworksRuntimeThermalSystem(CloudworksPlayerRuntime runtime, CloudworksRuntimeProgram program,
-            CloudworksRuntimeSimulation simulation) {
-        this.program = program; this.simulation = simulation;
-        machines = runtime.machines(); stock = runtime.resources(); thermal = runtime.thermal(); links = runtime.links();
+                                   CloudworksRuntimeSimulation simulation) {
+        this.program = program;
+        this.simulation = simulation;
+        machines = runtime.machines();
+        stock = runtime.resources();
+        thermal = runtime.thermal();
+        links = runtime.links();
         present = thermal.present();
         int size = present ? machines.size() : 0;
-        temperature = new double[size]; minimum = new double[size]; maximum = new double[size];
-        outgoing = new double[size]; incoming = new double[size]; produced = new double[size];
-        consumed = new double[size]; loss = new double[size]; requested = new double[present ? links.size() : 0];
+        temperature = new double[size];
+        minimum = new double[size];
+        maximum = new double[size];
+        outgoing = new double[size];
+        incoming = new double[size];
+        produced = new double[size];
+        consumed = new double[size];
+        loss = new double[size];
+        requested = new double[present ? links.size() : 0];
     }
 
     void produce(int clock) {
@@ -32,18 +45,28 @@ final class CloudworksRuntimeThermalSystem {
         for (int node : program.thermalNodes) {
             CloudworksThermalPlan plan = program.thermalPlans[node];
             if (plan == null || !machines.active(node)) continue;
+            addHeat(node, program.thermalEnvironmentHeat[node] * units(node));
             switch (plan.kind) {
-                case FUELWOOD: burnWood(node, plan); break;
-                case HEAT_GENERATOR: burnLava(node, plan); break;
-                case FUSION: fusionFuel(node, plan); break;
-                case FISSION: fissionFuel(node, plan); break;
+                case FUELWOOD:
+                    burnWood(node, plan);
+                    break;
+                case HEAT_GENERATOR:
+                    burnLava(node, plan);
+                    break;
+                case FUSION:
+                    fusionFuel(node, plan);
+                    break;
+                case FISSION:
+                    fissionFuel(node, plan);
+                    break;
                 case EVAPORATION:
                     double heat = plan.solarGain * program.thermalSolarCount[node]
-                            * mekanism.cloudworks.api.CloudworksGenerationPlan.solarBrightness(clock)
+                            * mekanism.cloudworks.api.environment.CloudworksGenerationPlan.solarBrightness(clock)
                             * thermal.capacity(node) * program.workRate;
                     addHeat(node, heat);
                     break;
-                default: break;
+                default:
+                    break;
             }
         }
         // Plasma and casing remain separate reservoirs even when injection is disabled.
@@ -73,9 +96,15 @@ final class CloudworksRuntimeThermalSystem {
             if (plan == null) continue;
             if (machines.active(node)) {
                 switch (plan.kind) {
-                    case BOILER: boiler(node, plan); break;
-                    case FISSION: fissionCooling(node, plan); break;
-                    case EVAPORATION: evaporation(node, plan); break;
+                    case BOILER:
+                        boiler(node, plan);
+                        break;
+                    case FISSION:
+                        fissionCooling(node, plan);
+                        break;
+                    case EVAPORATION:
+                        evaporation(node, plan);
+                        break;
                     case FUSION:
                         if (plan.cooled) fusionCooling(node, plan);
                         generation[machines.line(node)] += convert(node, plan.efficiency,
@@ -87,7 +116,8 @@ final class CloudworksRuntimeThermalSystem {
                         double efficiency = temperature <= 300 ? 0 : 1 - 300 / temperature;
                         generation[machines.line(node)] += convert(node, efficiency, extracted);
                         break;
-                    default: break;
+                    default:
+                        break;
                 }
             }
             dissipate(node, plan);
@@ -112,11 +142,20 @@ final class CloudworksRuntimeThermalSystem {
     private long units(int node) {
         return CloudworksQuantities.operationLimit(machines.machineCount(node), program.threads[node], program.workRate);
     }
+
     private void addHeat(int node, double heat) {
         thermal.add(node, heat);
         produced[node] = CloudworksRuntimeThermalStore.finite(produced[node] + heat);
     }
+
     private double convert(int node, double efficiency, double requestedHeat) {
+        if (simulation.generationLimit(node) <= 0) {
+            machines.setState(node, program.generationPlans[node].source() == CloudworksGenerationPlan.Source.UNSUPPORTED
+                    ? CloudworksRuntimeMachineStore.UNSUPPORTED_RECIPE : program.generationPlans[node].active(simulation.clock())
+                    ? CloudworksRuntimeMachineStore.WAITING_OUTPUT : CloudworksRuntimeMachineStore.WAITING_TIME);
+            return 0;
+        }
+        if (efficiency > 0) requestedHeat = Math.min(requestedHeat, simulation.generationLimit(node) / efficiency);
         double removed = thermal.take(node, requestedHeat, 300);
         consumed[node] += removed;
         double energy = removed * efficiency;
@@ -124,7 +163,7 @@ final class CloudworksRuntimeThermalSystem {
         if (plan.kind == Kind.HEAT_GENERATOR) energy = Math.min(energy, plan.processRate * units(node));
         loss[node] += removed - energy;
         if (removed > 0) machines.setState(node, CloudworksRuntimeMachineStore.GENERATING);
-        return CloudworksRuntimeThermalStore.finite(energy);
+        return simulation.convertGeneration(node, CloudworksRuntimeThermalStore.finite(energy));
     }
 
     private void burnWood(int node, CloudworksThermalPlan plan) {
@@ -139,7 +178,8 @@ final class CloudworksRuntimeThermalSystem {
             if (fuel.container >= 0) count = Math.min(count, outputRoom(node, fuel.container) / fuel.containerCount);
             if (count <= 0) continue;
             stock.take(machines.input(node), fuel.resource, count);
-            if (fuel.container >= 0) stock.add(machines.output(node), fuel.container, Math.multiplyExact(count, fuel.containerCount));
+            if (fuel.container >= 0)
+                stock.add(machines.output(node), fuel.container, Math.multiplyExact(count, fuel.containerCount));
             prepaid += count * (double) fuel.burnTicks;
         }
         double burned = Math.min(prepaid, quota);
@@ -160,16 +200,22 @@ final class CloudworksRuntimeThermalSystem {
             if (count <= 0) continue;
             stock.take(inventory, fuel.resource, count);
             stock.add(inventory, fuels.lava, Math.multiplyExact(count, fuel.units));
-            if (fuel.container >= 0) stock.add(machines.output(node), fuel.container, Math.multiplyExact(count, fuel.containerCount));
+            if (fuel.container >= 0)
+                stock.add(machines.output(node), fuel.container, Math.multiplyExact(count, fuel.containerCount));
         }
         long count = Math.min(units(node), stock.available(inventory, fuels.lava) / fuels.rate);
         stock.take(inventory, fuels.lava, Math.multiplyExact(count, fuels.rate));
-        addHeat(node, count * plan.heatPerUnit + program.thermalEnvironmentHeat[node] * units(node));
+        addHeat(node, count * plan.heatPerUnit);
         machines.setState(node, count > 0 || program.thermalEnvironmentHeat[node] > 0
                 ? CloudworksRuntimeMachineStore.GENERATING : CloudworksRuntimeMachineStore.WAITING_HEAT);
     }
 
     private void fusionFuel(int node, CloudworksThermalPlan plan) {
+        if (plan.rate == 0) {
+            thermal.setBurning(node, false);
+            machines.setState(node, CloudworksRuntimeMachineStore.OFF);
+            return;
+        }
         boolean fueled = false;
         for (CloudworksRuntimeRecipe recipe : program.fuels[machines.machineType(node)])
             fueled |= gasFuelCount(node, recipe, 1) > 0;
@@ -228,13 +274,17 @@ final class CloudworksRuntimeThermalSystem {
         }
         return gas ? (int) Math.min(Integer.MAX_VALUE, count) : 0;
     }
+
     private boolean gasIngredient(CloudworksRuntimeRecipe recipe, int ingredient) {
         return recipe.gasInputs[ingredient];
     }
 
     private void fissionFuel(int node, CloudworksThermalPlan plan) {
         CloudworksRuntimeRecipe recipe = first(node);
-        if (recipe == null) { machines.setState(node, CloudworksRuntimeMachineStore.NO_RECIPE); return; }
+        if (recipe == null) {
+            machines.setState(node, CloudworksRuntimeMachineStore.NO_RECIPE);
+            return;
+        }
         double credit = thermal.credit(node) + (double) units(node) / plan.rate;
         long count = Math.min((long) credit, available(node, recipe.matches[0]));
         count = Math.min(count, outputRoom(node, recipe.outputIds[0]));
@@ -254,9 +304,13 @@ final class CloudworksRuntimeThermalSystem {
         CloudworksRuntimeRecipe[] recipes = program.recipes[machines.machineType(node)];
         return recipes.length == 0 ? null : recipes[0];
     }
+
     private void fissionCooling(int node, CloudworksThermalPlan plan) {
         CloudworksRuntimeRecipe recipe = first(node);
-        if (recipe == null) { machines.setState(node, CloudworksRuntimeMachineStore.NO_RECIPE); return; }
+        if (recipe == null || recipe.matches.length < 2 || recipe.outputIds.length < 2) {
+            machines.setState(node, CloudworksRuntimeMachineStore.NO_RECIPE);
+            return;
+        }
         double availableHeat = Math.max(0, thermal.heat(node) - plan.threshold * thermal.capacity(node))
                 * Math.min(1, plan.processRate * program.workRate);
         long quota = (long) Math.min(Long.MAX_VALUE, availableHeat / plan.processHeat);
@@ -269,9 +323,13 @@ final class CloudworksRuntimeThermalSystem {
             consumed[node] += count * plan.processHeat;
         }
     }
+
     private void boiler(int node, CloudworksThermalPlan plan) {
         CloudworksRuntimeRecipe recipe = first(node);
-        if (recipe == null) { machines.setState(node, CloudworksRuntimeMachineStore.NO_RECIPE); return; }
+        if (recipe == null) {
+            machines.setState(node, CloudworksRuntimeMachineStore.NO_RECIPE);
+            return;
+        }
         long coolant = Math.min(available(node, recipe.matches[1]), outputRoom(node, recipe.outputIds[1]));
         coolant = Math.min(coolant, Math.round(coolant * Math.min(1, plan.coolantEfficiency * program.workRate)
                 * Math.max(0, 1 - thermal.temperature(node) / 100000)));
@@ -300,6 +358,7 @@ final class CloudworksRuntimeThermalSystem {
                 : outputRoom(node, recipe.outputIds[0]) == 0 ? CloudworksRuntimeMachineStore.WAITING_OUTPUT
                 : CloudworksRuntimeMachineStore.WAITING_INPUT);
     }
+
     private void evaporation(int node, CloudworksThermalPlan plan) {
         double rate = Math.max(0, Math.min(plan.maxTemperature, thermal.temperature(node)) - 300) * plan.processRate;
         double quota = rate * units(node) / Math.max(1, program.baseTicks[node]);
@@ -308,7 +367,11 @@ final class CloudworksRuntimeThermalSystem {
         boolean operated = false;
         if (maximum > 0) for (CloudworksRuntimeRecipe recipe : program.recipes[machines.machineType(node)]) {
             int count = simulation.thermalRecipe(node, recipe, maximum);
-            if (count > 0) { credit -= count; operated = true; break; }
+            if (count > 0) {
+                credit -= count;
+                operated = true;
+                break;
+            }
         }
         thermal.setCredit(node, Math.min(credit, Math.max(1, quota)));
         machines.setState(node, operated ? CloudworksRuntimeMachineStore.RUNNING
@@ -316,6 +379,7 @@ final class CloudworksRuntimeThermalSystem {
                 : stock.total(machines.input(node)) == 0 ? CloudworksRuntimeMachineStore.WAITING_INPUT
                 : CloudworksRuntimeMachineStore.WAITING_OUTPUT);
     }
+
     private void fusionCooling(int node, CloudworksThermalPlan plan) {
         double requested = Math.max(0, thermal.temperature(node) - 300) * plan.processRate * units(node);
         requested = Math.min(requested, Math.max(0, thermal.heat(node) - 300 * thermal.capacity(node)));
@@ -337,11 +401,14 @@ final class CloudworksRuntimeThermalSystem {
             }
         }
     }
+
     private long available(int node, int[] matches) {
         long result = 0;
-        for (int resource : matches) result = CloudworksQuantities.addLimit(result, stock.available(machines.input(node), resource));
+        for (int resource : matches)
+            result = CloudworksQuantities.addLimit(result, stock.available(machines.input(node), resource));
         return result;
     }
+
     private void consumeMatching(int node, int[] matches, long amount) {
         for (int resource : matches) {
             long taken = Math.min(amount, stock.available(machines.input(node), resource));
@@ -351,23 +418,27 @@ final class CloudworksRuntimeThermalSystem {
         }
         if (amount != 0) throw new IllegalStateException("Thermal resource allocation changed");
     }
+
     private long outputRoom(int node, int resource) {
         int codec = program.resourceCodec[resource];
         CloudworksRuntimeProgram.MachineType type = program.types[machines.machineType(node)];
-        long capacity = CloudworksQuantities.multiplyLimit(type.outputCapacity[codec], machines.machineCount(node));
+        long capacity = CloudworksQuantities.multiplyLimit(type.outputCapacity[codec],
+                machines.machineCount(node) * program.nodeBufferMultiplier[node]);
         long portRoom = 0;
         for (int port = 0; port < type.portNames.length; port++) {
             if (type.input[port] || !type.accepted[port][resource]) continue;
-            long room = CloudworksQuantities.multiplyLimit(type.portCapacity[port], machines.machineCount(node))
+            long room = CloudworksQuantities.multiplyLimit(type.portCapacity[port],
+                    machines.machineCount(node) * program.nodeBufferMultiplier[node])
                     - stock.groupTotal(machines.output(node), program.codecCount + port);
             portRoom = CloudworksQuantities.addLimit(portRoom, Math.max(0, room));
         }
         return Math.max(0, Math.min(portRoom, capacity - stock.groupTotal(machines.output(node), codec)));
     }
+
     private long inputRoom(int node, int resource) {
         int codec = program.resourceCodec[resource];
         long capacity = CloudworksQuantities.multiplyLimit(program.types[machines.machineType(node)].inputCapacity[codec],
-                machines.machineCount(node));
+                machines.machineCount(node) * program.nodeBufferMultiplier[node]);
         return Math.max(0, capacity - stock.groupTotal(machines.input(node), codec));
     }
 
@@ -386,7 +457,7 @@ final class CloudworksRuntimeThermalSystem {
             double requested = plan.kind == Kind.EVAPORATION
                     ? program.thermalDissipation[node] * Math.sqrt(temperature - 300) * thermal.capacity(node) * program.workRate
                     : (temperature - 300) * thermal.capacity(node)
-                            / (10000 + plan.conduction + plan.insulation) * program.workRate;
+                    / (10000 + plan.conduction + plan.insulation) * program.workRate;
             loss[node] += thermal.take(node, requested, 300);
         } else if (temperature < 300) {
             double warming = (300 - temperature) * thermal.capacity(node)

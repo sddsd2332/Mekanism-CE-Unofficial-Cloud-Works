@@ -12,6 +12,7 @@ import mekanism.client.gui.element.text.GuiTextField;
 import mekanism.common.inventory.container.SelectedWindowData;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.text.TextComponentString;
+import java.util.function.Consumer;
 
 public final class GuiLineIdentityWindow extends GuiLineWindow {
     private static final SelectedWindowData.WindowType TYPE = type("identity");
@@ -19,7 +20,7 @@ public final class GuiLineIdentityWindow extends GuiLineWindow {
 
     public GuiLineIdentityWindow(IGuiWrapper gui, CloudworksLineEditorModel model) {
         super(gui, 30, 30, 180, 140, "identity", TYPE);
-        java.util.function.Consumer<QIOResourceDescriptor> mark = model::addMarker;
+        Consumer<QIOResourceDescriptor> mark = model::addMarker;
         addChild(new GuiLineResourceGrid(gui, relativeX + 8, relativeY + 20, 5, 5, () -> {
             List<Entry> result = new ArrayList<>();
             for (QIOResourceDescriptor marker : model.draft.markers)

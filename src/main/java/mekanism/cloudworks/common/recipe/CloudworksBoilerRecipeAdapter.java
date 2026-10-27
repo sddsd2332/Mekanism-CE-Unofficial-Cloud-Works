@@ -6,6 +6,7 @@ import mekanism.common.MekanismFluids;
 import mekanism.common.content.boiler.SynchronizedBoilerData;
 import net.minecraftforge.fluids.FluidRegistry;
 import net.minecraftforge.fluids.FluidStack;
+import java.util.Objects;
 
 public final class CloudworksBoilerRecipeAdapter extends CloudworksMultiblockRecipeAdapter {
     public CloudworksBoilerRecipeAdapter(int waterPerOperation, int ticks) {
@@ -20,9 +21,9 @@ public final class CloudworksBoilerRecipeAdapter extends CloudworksMultiblockRec
         if (!Double.isFinite(required) || required > Integer.MAX_VALUE)
             throw new IllegalArgumentException("Boiler coolant quantity overflow");
         int coolant = Math.max(1, (int) Math.ceil(required));
-        return new CloudworksRecipeBatch().fluid(new FluidStack(FluidRegistry.WATER, water))
+        return new CloudworksRecipeBatch().unscaledOutputs().fluid(new FluidStack(FluidRegistry.WATER, water))
                 .gas(new GasStack(MekanismFluids.SuperheatedSodium, 1), coolant, "heated_coolant_input")
-                .output(new FluidStack(java.util.Objects.requireNonNull(FluidRegistry.getFluid("steam"), "steam"), water), "steam_output")
+                .output(new FluidStack(Objects.requireNonNull(FluidRegistry.getFluid("steam"), "steam"), water), "steam_output")
                 .output(new GasStack(MekanismFluids.Sodium, coolant), "cooled_coolant_output");
     }
 }

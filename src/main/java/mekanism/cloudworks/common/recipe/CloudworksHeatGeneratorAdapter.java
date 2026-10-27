@@ -1,20 +1,15 @@
 package mekanism.cloudworks.common.recipe;
 
 import mekanism.api.heat.HeatAPI;
-import mekanism.cloudworks.api.CloudworksEnergyGenerator;
-import mekanism.cloudworks.api.CloudworksGenerationContext;
-import mekanism.cloudworks.common.data.MachineNodeData;
+import mekanism.cloudworks.api.machine.CloudworksEnergyGenerator;
+import mekanism.cloudworks.api.environment.CloudworksGenerationContext;
+import mekanism.cloudworks.api.module.CloudworksMachineContext;
 import mekanism.common.config.MekanismConfig;
+import mekanism.cloudworks.api.environment.CloudworksGenerationPlan;
 
 /** Closed-form environment leg of the Mekanism heat generator. */
 public final class CloudworksHeatGeneratorAdapter implements CloudworksEnergyGenerator {
     private static final double EFFICIENCY = 0.5D;
-
-    @Override
-    public double generationPerTick(MachineNodeData node, int operations,
-                                    CloudworksGenerationContext context) {
-        return output(context, false) * Math.max(1, operations);
-    }
 
     /** Cold compiler formula: environment baseline or environment plus active fuel heat. */
     public static double output(CloudworksGenerationContext context, boolean burning) {
@@ -32,13 +27,8 @@ public final class CloudworksHeatGeneratorAdapter implements CloudworksEnergyGen
     }
 
     @Override
-    public double generationPerTick(MachineNodeData node, int operations) {
-        return generationPerTick(node, operations, new CloudworksGenerationContext(0, 1, 0, false));
-    }
-
-    @Override
-    public mekanism.cloudworks.api.CloudworksGenerationPlan freezeGeneration(MachineNodeData node, int operations,
+    public CloudworksGenerationPlan freeze(CloudworksMachineContext node, int operations,
             CloudworksGenerationContext context) {
-        return mekanism.cloudworks.api.CloudworksGenerationPlan.heat(generationPerTick(node, operations, context));
+        return CloudworksGenerationPlan.heat(output(context, false) * Math.max(1, operations));
     }
 }

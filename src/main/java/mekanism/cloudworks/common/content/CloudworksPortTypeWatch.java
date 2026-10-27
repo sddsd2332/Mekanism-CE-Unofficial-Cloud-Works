@@ -7,6 +7,7 @@ import mekanism.cloudworks.common.service.CloudworksPlayerDataManager;
 import javax.annotation.Nullable;
 import java.util.List;
 import java.util.UUID;
+import mekanism.common.Mekanism;
 
 /**
  * 协议储存箱 type-unblock watch (P1-6/P1-7): the single place a paused upload
@@ -81,6 +82,9 @@ public final class CloudworksPortTypeWatch {
         try {
             manager.unregisterTypeUnblockListener(owner, wasWatched, onUnblock);
         } catch (RuntimeException ignored) {
+            if (Mekanism.logger != null)
+                Mekanism.logger.debug("Could not release Cloudworks port resource watch for {}",
+                        wasWatched, ignored);
         }
     }
 
